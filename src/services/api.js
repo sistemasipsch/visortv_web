@@ -10,6 +10,24 @@ const getBaseUrl = () => {
   return '/api';
 };
 
+export const resolveMediaUrl = (url) => {
+  if (!url) return '';
+  if (
+    url.startsWith('http://') ||
+    url.startsWith('https://') ||
+    url.startsWith('data:') ||
+    url.startsWith('blob:')
+  ) {
+    return url;
+  }
+  const apiBase = import.meta.env.VITE_API_BASE_URL || '';
+  if (apiBase) {
+    const origin = apiBase.replace(/\/api\/?$/, '');
+    return `${origin}${url.startsWith('/') ? '' : '/'}${url}`;
+  }
+  return url;
+};
+
 const api = axios.create({
   baseURL: getBaseUrl(),
   headers: {

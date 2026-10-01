@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
-import { playlistService } from '../services/api';
+import { playlistService, resolveMediaUrl } from '../services/api';
 import IconRenderer from '../components/IconRenderer';
 import { isImageUrl } from '../constants/icons';
 import { getThemeById } from '../themes/visorThemes';
@@ -116,7 +116,7 @@ const VisorTV = () => {
     [next1, next2].forEach((item) => {
       if (item && item.type === 'image' && item.url) {
         const preImg = new window.Image();
-        preImg.src = item.url;
+        preImg.src = resolveMediaUrl(item.url);
       }
     });
   }, [currentIndex, playlist]);
@@ -298,7 +298,7 @@ const VisorTV = () => {
     const nextMedia = playlist[nextIdx];
     if (nextMedia && nextMedia.type === 'image' && nextMedia.url) {
       const preloadImg = new window.Image();
-      preloadImg.src = nextMedia.url;
+      preloadImg.src = resolveMediaUrl(nextMedia.url);
     }
   }, [currentIndex, playlist]);
 
@@ -562,7 +562,7 @@ const VisorTV = () => {
             ) : (
               <video
                 ref={videoARef}
-                src={itemA.url}
+                src={resolveMediaUrl(itemA.url)}
                 muted={isMuted}
                 playsInline
                 preload="auto"
@@ -590,7 +590,7 @@ const VisorTV = () => {
           ) : null
         ) : itemA ? (
           <img
-            src={itemA.url}
+            src={resolveMediaUrl(itemA.url)}
             alt={itemA.title || 'Visor TV Media A'}
             fetchPriority={activeSlot === 'A' ? 'high' : 'auto'}
             decoding="async"
@@ -620,7 +620,7 @@ const VisorTV = () => {
             ) : (
               <video
                 ref={videoBRef}
-                src={itemB.url}
+                src={resolveMediaUrl(itemB.url)}
                 muted={isMuted}
                 playsInline
                 preload="auto"
@@ -648,7 +648,7 @@ const VisorTV = () => {
           ) : null
         ) : itemB ? (
           <img
-            src={itemB.url}
+            src={resolveMediaUrl(itemB.url)}
             alt={itemB.title || 'Visor TV Media B'}
             fetchPriority={activeSlot === 'B' ? 'high' : 'auto'}
             decoding="async"

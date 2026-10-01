@@ -81,16 +81,11 @@ export const resolveAvatarUrl = (url) => {
   ) {
     return url;
   }
-  if (url.startsWith('/api')) {
-    const apiBase = import.meta.env.VITE_API_BASE_URL;
-    if (apiBase && apiBase.startsWith('http')) {
-      try {
-        const origin = new URL(apiBase).origin;
-        return `${origin}${url}`;
-      } catch {
-        return url;
-      }
-    }
+  const apiBase = import.meta.env.VITE_API_BASE_URL || '/api';
+  if (apiBase.startsWith('http')) {
+    const backendRoot = apiBase.replace(/\/api\/?$/, '');
+    const cleanPath = url.startsWith('/') ? url : `/${url}`;
+    return `${backendRoot}${cleanPath}`;
   }
   return url;
 };

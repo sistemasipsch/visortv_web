@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { useSearchParams } from 'react-router-dom';
-import { sedesService, mediaService } from '../services/api';
+import { sedesService, mediaService, resolveMediaUrl } from '../services/api';
 import Modal from '../components/Modal';
 import {
   Film,
@@ -635,14 +635,14 @@ const AdminMedia = () => {
                 >
                   {item.type === 'video' ? (
                     <>
-                      <video src={item.url} className="w-full h-full object-cover" preload="metadata" />
+                      <video src={resolveMediaUrl(item.url)} className="w-full h-full object-cover" preload="metadata" />
                       <div className="absolute inset-0 bg-black/30 flex items-center justify-center group-hover:bg-indigo-600/40 transition-colors">
                         <Play className="w-5 h-5 text-white fill-current" />
                       </div>
                     </>
                   ) : (
                     <img
-                      src={item.thumbnail_url || item.url}
+                      src={resolveMediaUrl(item.thumbnail_url || item.url)}
                       alt={item.title}
                       loading="lazy"
                       decoding="async"
@@ -779,7 +779,7 @@ const AdminMedia = () => {
                 />
               ) : (
                 <video
-                  src={previewItem?.url}
+                  src={resolveMediaUrl(previewItem?.url)}
                   controls
                   autoPlay
                   muted
@@ -789,7 +789,7 @@ const AdminMedia = () => {
               )
             ) : (
               <img
-                src={previewItem?.url}
+                src={resolveMediaUrl(previewItem?.url)}
                 alt={previewItem?.title}
                 className="w-full max-h-[70vh] object-contain"
               />
@@ -816,7 +816,7 @@ const AdminMedia = () => {
                 <span>Eliminar archivo</span>
               </button>
               <a
-                href={previewItem?.url}
+                href={resolveMediaUrl(previewItem?.url)}
                 target="_blank"
                 rel="noopener noreferrer"
                 className="text-rose-600 hover:underline flex items-center gap-1 font-medium"
