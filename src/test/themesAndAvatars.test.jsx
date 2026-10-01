@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { VISOR_THEMES, getThemeById } from '../themes/visorThemes';
 import { ADMIN_THEMES, getAdminTheme } from '../themes/adminThemes';
-import { PRESET_AVATARS, renderUserAvatar } from '../utils/avatarUtils';
+import { PRESET_AVATARS, renderUserAvatar, getCleanAvatarId } from '../utils/avatarUtils';
 
 describe('Visor TV Themes', () => {
   it('defines the unified Visor TV Kiosk aesthetic', () => {
@@ -73,6 +73,26 @@ describe('Avatar Utilities', () => {
     expect(vnode.type).toBe('img');
     expect(vnode.props.src).toContain('/api/media/stream/avatar_1_123.jpg');
     expect(vnode.props.alt).toBe('Ashly');
+  });
+
+  it('correctly extracts clean avatar ID from stream URLs using getCleanAvatarId', () => {
+    expect(getCleanAvatarId('avatar-bot')).toBe('avatar-bot');
+    expect(getCleanAvatarId('/api/media/stream/avatar-code')).toBe('avatar-code');
+    expect(
+      getCleanAvatarId('https://visortvapi.clinicalhouse.co/public/api/media/stream/avatar-crown')
+    ).toBe('avatar-crown');
+    expect(getCleanAvatarId('https://images.unsplash.com/photo-123')).toBe(
+      'https://images.unsplash.com/photo-123'
+    );
+  });
+
+  it('renders preset avatar correctly even if wrapped in media stream URL', () => {
+    const vnode = renderUserAvatar(
+      'https://visortvapi.clinicalhouse.co/public/api/media/stream/avatar-crown',
+      'Dilan'
+    );
+    expect(vnode).toBeDefined();
+    expect(vnode.props.title).toBe('Corona Imperial');
   });
 });
 

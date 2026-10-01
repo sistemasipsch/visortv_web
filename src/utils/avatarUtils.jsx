@@ -71,6 +71,17 @@ const LEGACY_AVATAR_MAP = {
   'avatar-user': 'avatar-code',
 };
 
+export const getCleanAvatarId = (avatarString) => {
+  if (!avatarString || typeof avatarString !== 'string') return avatarString;
+  const trimmed = avatarString.trim();
+  // Extract preset avatar if wrapped in a URL or path like /api/media/stream/avatar-code
+  const streamMatch = trimmed.match(/(?:^|\/)(avatar-[a-z0-9-]+)(?:\?.*)?$/i);
+  if (streamMatch) {
+    return streamMatch[1];
+  }
+  return trimmed;
+};
+
 export const resolveAvatarUrl = (url) => {
   if (!url) return '';
   if (
@@ -101,8 +112,9 @@ export const renderUserAvatar = (avatarString, name = 'Usuario', className = 'w-
     );
   }
 
-  // Resolve legacy IDs if applicable
-  const effectiveId = LEGACY_AVATAR_MAP[avatarString] || avatarString;
+  // Clean and resolve legacy or stream-wrapped preset IDs
+  const cleanId = getCleanAvatarId(avatarString);
+  const effectiveId = LEGACY_AVATAR_MAP[cleanId] || cleanId;
 
   // Check if it's a preset avatar
   const preset = PRESET_AVATARS.find((p) => p.id === effectiveId);

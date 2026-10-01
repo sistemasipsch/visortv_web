@@ -1,6 +1,6 @@
-import React, { useState, useRef } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import Modal from './Modal';
-import { PRESET_AVATARS, renderUserAvatar } from '../utils/avatarUtils';
+import { PRESET_AVATARS, renderUserAvatar, getCleanAvatarId } from '../utils/avatarUtils';
 import {
   Sparkles,
   Check,
@@ -18,17 +18,20 @@ const AvatarPickerModal = ({
   onSelectAvatar,
   onUploadFile,
 }) => {
+  const cleanInitial = getCleanAvatarId(currentAvatar);
   const [selectedPreset, setSelectedPreset] = useState(
-    currentAvatar?.startsWith('avatar-') ? currentAvatar : 'avatar-code'
+    cleanInitial?.startsWith('avatar-') ? cleanInitial : 'avatar-code'
   );
   const [customUrl, setCustomUrl] = useState(
-    currentAvatar && !currentAvatar.startsWith('avatar-') && !currentAvatar.startsWith('blob:')
-      ? currentAvatar
+    cleanInitial && !cleanInitial.startsWith('avatar-') && !cleanInitial.startsWith('blob:')
+      ? cleanInitial
       : ''
   );
 
-  // Initial tab mode
-  const [mode, setMode] = useState('file'); // Default to file upload!
+  // Tab mode: 'file', 'presets', 'url'
+  const [mode, setMode] = useState(
+    cleanInitial?.startsWith('avatar-') ? 'presets' : 'file'
+  );
   const [selectedFile, setSelectedFile] = useState(null);
   const [filePreview, setFilePreview] = useState(null);
   const [uploading, setUploading] = useState(false);
@@ -36,6 +39,32 @@ const AvatarPickerModal = ({
   const [dragActive, setDragActive] = useState(false);
 
   const fileInputRef = useRef(null);
+
+  // Synchronize modal state whenever opened or when currentAvatar changes
+  useEffect(() => {
+    if (!isOpen) return;
+
+    const clean = getCleanAvatarId(currentAvatar);
+    setSelectedFile(null);
+    setFilePreview(null);
+    setErrorMsg('');
+    setDragActive(false);
+
+    if (clean?.startsWith('avatar-')) {
+      setSelectedPreset(clean);
+      setMode('presets');
+    } else if (
+      clean &&
+      !clean.startsWith('blob:') &&
+      (clean.startsWith('http://') || clean.startsWith('https://'))
+    ) {
+      setCustomUrl(clean);
+      setMode('url');
+    } else {
+      setMode('file');
+      setSelectedPreset('avatar-code');
+    }
+  }, [isOpen, currentAvatar]);
 
   const handleFileChange = (e) => {
     const file = e.target.files?.[0];

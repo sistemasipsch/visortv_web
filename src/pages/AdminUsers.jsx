@@ -3,7 +3,7 @@ import { userService } from '../services/api';
 import { useAuth } from '../context/useAuth';
 import Modal from '../components/Modal';
 import AvatarPickerModal from '../components/AvatarPickerModal';
-import { renderUserAvatar } from '../utils/avatarUtils';
+import { renderUserAvatar, getCleanAvatarId } from '../utils/avatarUtils';
 import {
   Users,
   UserPlus,
@@ -96,7 +96,7 @@ const AdminUsers = () => {
       password: '', // blank unless changing
       role: user.role,
       is_active: user.is_active,
-      avatar: user.avatar || '',
+      avatar: getCleanAvatarId(user.avatar) || '',
     });
     setShowModal(true);
   };
@@ -141,7 +141,7 @@ const AdminUsers = () => {
           email: formData.email?.trim() ? formData.email.trim() : null,
           role: formData.role,
           is_active: formData.is_active,
-          avatar: formData.avatar && !formData.avatar.startsWith('blob:') ? formData.avatar : null,
+          avatar: formData.avatar && !formData.avatar.startsWith('blob:') ? getCleanAvatarId(formData.avatar) : null,
         };
         if (formData.password.trim()) {
           if (formData.password.trim().length < 6) {
@@ -193,7 +193,7 @@ const AdminUsers = () => {
           password: formData.password.trim(),
           role: formData.role,
           is_active: formData.is_active,
-          avatar: formData.avatar && !formData.avatar.startsWith('blob:') ? formData.avatar : 'avatar-code',
+          avatar: formData.avatar && !formData.avatar.startsWith('blob:') ? getCleanAvatarId(formData.avatar) : 'avatar-code',
         };
         const createRes = await userService.create(createPayload);
         const newUserId = createRes.data?.data?.id || createRes.data?.user?.id || createRes.data?.id;

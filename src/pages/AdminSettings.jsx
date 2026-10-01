@@ -2,7 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { settingsService, authService, userService } from '../services/api';
 import { useAuth } from '../context/useAuth';
 import AvatarPickerModal from '../components/AvatarPickerModal';
-import { renderUserAvatar } from '../utils/avatarUtils';
+import { renderUserAvatar, getCleanAvatarId } from '../utils/avatarUtils';
 import {
   Settings,
   Lock,
@@ -50,19 +50,22 @@ const AdminSettings = () => {
 
   const handleSelectAvatar = async (newAvatar) => {
     if (!user) return;
+    const cleanAvatar = getCleanAvatarId(newAvatar);
     setSavingAvatar(true);
     setAvatarMessage({ text: '', type: '' });
     try {
-      await authService.updateAvatar({ avatar: newAvatar });
-      updateUser({ avatar: newAvatar });
+      const res = await authService.updateAvatar({ avatar: cleanAvatar });
+      const savedAvatar = getCleanAvatarId(res.data?.avatar || cleanAvatar);
+      updateUser({ avatar: savedAvatar });
       setAvatarMessage({ text: 'Avatar de perfil actualizado exitosamente', type: 'success' });
       setShowAvatarPicker(false);
       setTimeout(() => setAvatarMessage({ text: '', type: '' }), 4000);
     } catch (err) {
       console.warn('Initial updateAvatar warning, trying updateProfile fallback:', err);
       try {
-        await authService.updateProfile({ avatar: newAvatar });
-        updateUser({ avatar: newAvatar });
+        const res2 = await authService.updateProfile({ avatar: cleanAvatar });
+        const savedAvatar = getCleanAvatarId(res2.data?.user?.avatar || cleanAvatar);
+        updateUser({ avatar: savedAvatar });
         setAvatarMessage({ text: 'Avatar de perfil actualizado exitosamente', type: 'success' });
         setShowAvatarPicker(false);
         setTimeout(() => setAvatarMessage({ text: '', type: '' }), 4000);

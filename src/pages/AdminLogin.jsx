@@ -153,10 +153,7 @@ const AdminLogin = () => {
           </form>
         </div>
 
-        {/* Footer info */}
-        <p className="text-center text-xs text-slate-400 mt-6 font-medium">
-          Visor TV • Desarrollado por <strong className="text-slate-600 font-semibold">Ashly Nicole</strong> • v2.0
-        </p>
+
       </div>
     </div>
   );
