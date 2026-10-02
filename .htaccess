@@ -1,0 +1,22 @@
+<IfModule mod_rewrite.c>
+  RewriteEngine On
+  RewriteBase /
+
+  # 1. Si la petición ya incluye /dist/, permitirla directamente
+  RewriteCond %{REQUEST_URI} ^/dist/ [NC]
+  RewriteRule ^ - [L]
+
+  # 2. Petición a la raíz del sitio
+  RewriteRule ^$ dist/index.html [L]
+
+  # 3. Si el archivo o recurso existe dentro de dist (ej: /assets/..., /favicon.svg, /icons.svg)
+  RewriteCond %{DOCUMENT_ROOT}/dist%{REQUEST_URI} -f [OR]
+  RewriteCond %{DOCUMENT_ROOT}/dist%{REQUEST_URI} -d [OR]
+  RewriteCond %{REQUEST_URI} ^/assets/ [NC]
+  RewriteRule ^(.*)$ dist/$1 [L]
+
+  # 4. Enrutamiento SPA: cualquier ruta interna de React Router (/admin, /sede/..., etc.) va a dist/index.html
+  RewriteCond %{REQUEST_FILENAME} !-f
+  RewriteCond %{REQUEST_FILENAME} !-d
+  RewriteRule ^.*$ dist/index.html [L]
+</IfModule>
