@@ -1,6 +1,6 @@
 import React from 'react';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen, waitFor } from '@testing-library/react';
+import { render, screen, waitFor, act, fireEvent } from '@testing-library/react';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import VisorTV from '../pages/VisorTV';
 import { playlistService } from '../services/api';
@@ -111,5 +111,108 @@ describe('VisorTV component', () => {
       expect(screen.queryByText(/^Cartel Promocional 1$/i)).not.toBeInTheDocument();
       expect(screen.getByTitle(/Pausar \(Espacio\)/i)).toBeInTheDocument();
     });
+  });
+
+  it('cycles smoothly through all items in the playlist loop', async () => {
+    vi.spyOn(playlistService, 'getPlaylist').mockResolvedValue({
+      data: {
+        success: true,
+        version_hash: 'hash-loop-test',
+        sede: { id: 1, name: 'Sede Loop', slug: 'sede-loop' },
+        playlist: [
+          { id: 1, title: 'Item 1', type: 'image', url: 'https://example.com/1.jpg', duration: 10 },
+          { id: 2, title: 'Item 2', type: 'image', url: 'https://example.com/2.jpg', duration: 10 },
+          { id: 3, title: 'Item 3', type: 'image', url: 'https://example.com/3.jpg', duration: 10 },
+        ],
+        settings: { tv_show_clock: true, tv_show_progress_bar: true },
+      },
+    });
+
+    render(
+      <MemoryRouter initialEntries={['/visor/sede-loop']}>
+        <Routes>
+          <Route path="/visor/:slug" element={<VisorTV />} />
+        </Routes>
+      </MemoryRouter>
+    );
+
+    await waitFor(() => {
+      expect(screen.getByText('1')).toBeInTheDocument();
+      expect(screen.getByText('/ 3')).toBeInTheDocument();
+    });
+
+    // Advance to item 2
+    const nextBtn = screen.getByTitle(/Siguiente/i);
+    await act(async () => {
+      fireEvent.click(nextBtn);
+    });
+    await waitFor(() => {
+      expect(screen.getByText('2')).toBeInTheDocument();
+    });
+
+    // Advance to item 3
+    await act(async () => {
+      fireEvent.click(nextBtn);
+    });
+    await waitFor(() => {
+      expect(screen.getByText('3')).toBeInTheDocument();
+    });
+
+    // Loop back to item 1
+    await act(async () => {
+      fireEvent.click(nextBtn);
+    });
+    await waitFor(() => {
+      expect(screen.getByText('1')).toBeInTheDocument();
+    });
+  });
+
+  it('does not reset playback index when background polling checkVersion has identical hash', async () => {
+    vi.spyOn(playlistService, 'getPlaylist').mockResolvedValue({
+      data: {
+        success: true,
+        version_hash: 'initial-version-hash-123',
+        sede: { id: 1, name: 'Sede Sync', slug: 'sede-sync' },
+        playlist: [
+          { id: 101, title: 'Video 1', type: 'video', url: 'https://example.com/v1.mp4' },
+          { id: 102, title: 'Video 2', type: 'video', url: 'https://example.com/v2.mp4' },
+          { id: 103, title: 'Video 3', type: 'video', url: 'https://example.com/v3.mp4' },
+        ],
+        settings: { tv_auto_refresh_seconds: 30 },
+      },
+    });
+
+    vi.spyOn(playlistService, 'checkVersion').mockResolvedValue({
+      data: {
+        success: true,
+        version_hash: 'initial-version-hash-123',
+        items_count: 3,
+      },
+    });
+
+    render(
+      <MemoryRouter initialEntries={['/visor/sede-sync']}>
+        <Routes>
+          <Route path="/visor/:slug" element={<VisorTV />} />
+        </Routes>
+      </MemoryRouter>
+    );
+
+    await waitFor(() => {
+      expect(screen.getByText('1')).toBeInTheDocument();
+      expect(screen.getByText('/ 3')).toBeInTheDocument();
+    });
+
+    // User or playback advances to Video 2
+    const nextBtn = screen.getByTitle(/Siguiente/i);
+    await act(async () => {
+      fireEvent.click(nextBtn);
+    });
+    await waitFor(() => {
+      expect(screen.getByText('2')).toBeInTheDocument();
+    });
+
+    // Background checkVersion returns matching hash: should remain on Video 2
+    expect(screen.getByText('2')).toBeInTheDocument();
   });
 });

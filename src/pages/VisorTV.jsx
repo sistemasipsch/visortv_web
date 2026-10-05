@@ -103,10 +103,21 @@ const VisorTV = () => {
   const controlsTimeoutRef = useRef(null);
   const containerRef = useRef(null);
   const latestPlaylistRef = useRef([]);
+  const versionHashRef = useRef('');
+  const currentIndexRef = useRef(0);
+  const activeSlotRef = useRef('A');
 
   useEffect(() => {
     latestPlaylistRef.current = playlist;
   }, [playlist]);
+
+  useEffect(() => {
+    currentIndexRef.current = currentIndex;
+  }, [currentIndex]);
+
+  useEffect(() => {
+    activeSlotRef.current = activeSlot;
+  }, [activeSlot]);
 
   // Smart Preload
   useEffect(() => {
@@ -121,13 +132,26 @@ const VisorTV = () => {
     });
   }, [currentIndex, playlist]);
 
-  // Initial Load of Playlist
+  // Initial Load & Periodic Sync of Playlist
   const loadPlaylist = useCallback(async (isInitial = false) => {
     if (isInitial) {
       setIsLoading(true);
+      setError(null);
     }
-    setError(null);
     try {
+      // In background polling, check version first to avoid unnecessary payload and re-renders
+      if (!isInitial && versionHashRef.current) {
+        try {
+          const versionRes = await playlistService.checkVersion(slug);
+          if (versionRes.data.success && versionRes.data.version_hash === versionHashRef.current) {
+            // Version has not changed, do nothing so ongoing playback is completely undisturbed
+            return;
+          }
+        } catch (checkErr) {
+          console.warn('checkVersion check failed, falling back to full playlist fetch:', checkErr);
+        }
+      }
+
       const res = await playlistService.getPlaylist(slug);
       if (res.data.success) {
         setSede(res.data.sede);
@@ -140,20 +164,54 @@ const VisorTV = () => {
         });
         const items = res.data.playlist || [];
         setPlaylist(items);
+        latestPlaylistRef.current = items;
         setVersionHash(res.data.version_hash);
+        versionHashRef.current = res.data.version_hash;
 
-        if (items.length > 0) {
-          setSlotAIndex(0);
-          setSlotBIndex(items.length > 1 ? 1 : 0);
-          setActiveSlot('A');
-          setCurrentIndex(0);
+        if (isInitial) {
+          if (items.length > 0) {
+            setSlotAIndex(0);
+            setSlotBIndex(items.length > 1 ? 1 : 0);
+            setActiveSlot('A');
+            activeSlotRef.current = 'A';
+            setCurrentIndex(0);
+            currentIndexRef.current = 0;
+          }
+        } else {
+          // Background update: if current item is still in playlist, retain current playback without resetting to 0
+          if (items.length > 0) {
+            const currentItem = latestPlaylistRef.current[currentIndexRef.current];
+            const foundIndex = currentItem ? items.findIndex((it) => it.id === currentItem.id) : -1;
+            if (foundIndex !== -1) {
+              setCurrentIndex(foundIndex);
+              currentIndexRef.current = foundIndex;
+              if (activeSlotRef.current === 'A') {
+                setSlotAIndex(foundIndex);
+                setSlotBIndex((foundIndex + 1) % items.length);
+              } else {
+                setSlotBIndex(foundIndex);
+                setSlotAIndex((foundIndex + 1) % items.length);
+              }
+            } else {
+              // Current item was deleted, advance safely
+              const nextSafe = Math.min(currentIndexRef.current, items.length - 1);
+              setCurrentIndex(nextSafe);
+              currentIndexRef.current = nextSafe;
+              setSlotAIndex(nextSafe);
+              setSlotBIndex((nextSafe + 1) % items.length);
+              setActiveSlot('A');
+              activeSlotRef.current = 'A';
+            }
+          }
         }
       }
     } catch (err) {
       console.error('Error fetching playlist:', err);
-      setError(
-        err.response?.data?.error || 'No se pudo cargar la programación de esta sede.'
-      );
+      if (isInitial) {
+        setError(
+          err.response?.data?.error || 'No se pudo cargar la programación de esta sede.'
+        );
+      }
     } finally {
       if (isInitial) {
         setIsLoading(false);
@@ -230,27 +288,31 @@ const VisorTV = () => {
         } catch (_) {}
       }
 
-      if (activeSlot === 'A') {
+      const nextSlot = activeSlotRef.current === 'A' ? 'B' : 'A';
+      if (nextSlot === 'B') {
         setSlotBIndex(validIndex);
         setActiveSlot('B');
+        activeSlotRef.current = 'B';
       } else {
         setSlotAIndex(validIndex);
         setActiveSlot('A');
+        activeSlotRef.current = 'A';
       }
 
       setCurrentIndex(validIndex);
+      currentIndexRef.current = validIndex;
       setProgress(0);
     },
-    [activeSlot]
+    []
   );
 
   const goToNext = useCallback(() => {
-    advanceToSlot(currentIndex + 1);
-  }, [advanceToSlot, currentIndex]);
+    advanceToSlot(currentIndexRef.current + 1);
+  }, [advanceToSlot]);
 
   const goToPrev = useCallback(() => {
-    advanceToSlot(currentIndex - 1);
-  }, [advanceToSlot, currentIndex]);
+    advanceToSlot(currentIndexRef.current - 1);
+  }, [advanceToSlot]);
 
   const currentItem = playlist[currentIndex] || null;
   const isEmbedVideo = currentItem?.type === 'video' && !!getEmbedUrl(currentItem?.url);
