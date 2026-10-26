@@ -26,7 +26,7 @@ const getEmbedUrl = (url) => {
   if (ytMatch) {
     return `https://www.youtube.com/embed/${ytMatch[1]}?autoplay=1&mute=1&loop=1&playlist=${ytMatch[1]}&controls=0`;
   }
-  const vimeoMatch = url.match(/vimeo\.com\/(?:channels\/(?:\w+\/)?|groups\/(?:[^\/]*)\/videos\/|album\/(?:\d+)\/video\/|)(\d+)/);
+  const vimeoMatch = url.match(/vimeo\.com\/(?:channels\/(?:\w+\/)?|groups\/(?:[^/]*)\/videos\/|album\/(?:\d+)\/video\/|)(\d+)/);
   if (vimeoMatch) {
     return `https://player.vimeo.com/video/${vimeoMatch[1]}?autoplay=1&muted=1&loop=1&background=1`;
   }
@@ -52,43 +52,22 @@ const VisorTV = () => {
   const [error, setError] = useState(null);
   const [isPaused, setIsPaused] = useState(false);
   const [isMuted, setIsMuted] = useState(false);
-  const [fitMode] = useState('enhanced');
-  const [userFitOverride, setUserFitOverride] = useState(null);
+
+  // Persistent Fit Mode: default to 'cover' (Pantalla Completa) across all videos until manually changed
+  const [userFitOverride, setUserFitOverride] = useState(() => {
+    try {
+      return localStorage.getItem('visor_tv_fit_mode') || 'cover';
+    } catch (_) {
+      return 'cover';
+    }
+  });
+
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [showControls, setShowControls] = useState(true);
   const [currentTime, setCurrentTime] = useState(new Date());
   const [progress, setProgress] = useState(0);
   const [versionHash, setVersionHash] = useState('');
   const [showHelpModal, setShowHelpModal] = useState(false);
-
-  // Auto-activate audio on first TV remote / keyboard / touch interaction
-  useEffect(() => {
-    const handleFirstInteraction = () => {
-      setIsMuted(false);
-      if (videoARef.current) videoARef.current.muted = false;
-      if (videoBRef.current) videoBRef.current.muted = false;
-    };
-    window.addEventListener('click', handleFirstInteraction, { once: true });
-    window.addEventListener('keydown', handleFirstInteraction, { once: true });
-    window.addEventListener('touchstart', handleFirstInteraction, { once: true });
-    return () => {
-      window.removeEventListener('click', handleFirstInteraction);
-      window.removeEventListener('keydown', handleFirstInteraction);
-      window.removeEventListener('touchstart', handleFirstInteraction);
-    };
-  }, []);
-
-  // Single elegant aesthetic
-  const currentTheme = getThemeById('elegant-red');
-
-  const getEffectiveFit = useCallback(
-    (item) => {
-      if (userFitOverride) return userFitOverride;
-      if (item && item.fit_mode && item.fit_mode !== 'contain') return item.fit_mode;
-      return fitMode || 'enhanced';
-    },
-    [userFitOverride, fitMode]
-  );
 
   // Double Buffering (Slot A & Slot B) State
   const [activeSlot, setActiveSlot] = useState('A');
@@ -98,6 +77,7 @@ const VisorTV = () => {
   // Refs
   const videoARef = useRef(null);
   const videoBRef = useRef(null);
+  const playPromiseRef = useRef(null);
   const imageTimerRef = useRef(null);
   const progressTimerRef = useRef(null);
   const controlsTimeoutRef = useRef(null);
@@ -106,6 +86,14 @@ const VisorTV = () => {
   const versionHashRef = useRef('');
   const currentIndexRef = useRef(0);
   const activeSlotRef = useRef('A');
+
+  // Error cooldown and consecutive error tracker to prevent cascading crash
+  const consecutiveErrorsRef = useRef(0);
+  const errorCooldownRef = useRef(null);
+
+  // Stall Watchdog Refs
+  const stallCounterRef = useRef(0);
+  const lastTimeRef = useRef(-1);
 
   useEffect(() => {
     latestPlaylistRef.current = playlist;
@@ -119,7 +107,149 @@ const VisorTV = () => {
     activeSlotRef.current = activeSlot;
   }, [activeSlot]);
 
-  // Smart Preload
+  // Single elegant aesthetic
+  const currentTheme = getThemeById('elegant-red');
+
+  // Save fit mode to localStorage and state
+  const changeFitMode = useCallback((newMode) => {
+    setUserFitOverride(newMode);
+    try {
+      localStorage.setItem('visor_tv_fit_mode', newMode);
+    } catch (_) {}
+  }, []);
+
+  const getEffectiveFit = useCallback(
+    (item) => {
+      if (userFitOverride) return userFitOverride;
+      if (item && item.fit_mode && item.fit_mode !== 'contain') return item.fit_mode;
+      return 'cover';
+    },
+    [userFitOverride]
+  );
+
+  const toggleFitMode = useCallback(() => {
+    const current = userFitOverride || 'cover';
+    const nextMode = current === 'cover' ? 'contain' : current === 'contain' ? 'enhanced' : 'cover';
+    changeFitMode(nextMode);
+  }, [userFitOverride, changeFitMode]);
+
+  // Fullscreen Handler with cross-browser and Smart TV vendor prefixes
+  const toggleFullscreen = useCallback(() => {
+    const fsElement =
+      document.fullscreenElement ||
+      document.webkitFullscreenElement ||
+      document.mozFullScreenElement ||
+      document.msFullscreenElement;
+
+    if (!fsElement) {
+      const el = containerRef.current || document.documentElement;
+      if (el.requestFullscreen) {
+        el.requestFullscreen().catch(() => {});
+      } else if (el.webkitRequestFullscreen) {
+        el.webkitRequestFullscreen();
+      } else if (el.mozRequestFullScreen) {
+        el.mozRequestFullScreen();
+      } else if (el.msRequestFullscreen) {
+        el.msRequestFullscreen();
+      }
+    } else {
+      if (document.exitFullscreen) {
+        document.exitFullscreen().catch(() => {});
+      } else if (document.webkitExitFullscreen) {
+        document.webkitExitFullscreen();
+      } else if (document.mozCancelFullScreen) {
+        document.mozCancelFullScreen();
+      } else if (document.msExitFullscreen) {
+        document.msExitFullscreen();
+      }
+    }
+  }, []);
+
+  // Listen to Fullscreen changes across all browser implementations
+  useEffect(() => {
+    const handleFullscreenChange = () => {
+      const fsElement =
+        document.fullscreenElement ||
+        document.webkitFullscreenElement ||
+        document.mozFullScreenElement ||
+        document.msFullscreenElement;
+      setIsFullscreen(!!fsElement);
+    };
+
+    document.addEventListener('fullscreenchange', handleFullscreenChange);
+    document.addEventListener('webkitfullscreenchange', handleFullscreenChange);
+    document.addEventListener('mozfullscreenchange', handleFullscreenChange);
+    document.addEventListener('MSFullscreenChange', handleFullscreenChange);
+    return () => {
+      document.removeEventListener('fullscreenchange', handleFullscreenChange);
+      document.removeEventListener('webkitfullscreenchange', handleFullscreenChange);
+      document.removeEventListener('mozfullscreenchange', handleFullscreenChange);
+      document.removeEventListener('MSFullscreenChange', handleFullscreenChange);
+    };
+  }, []);
+
+  // Safe Play and Pause Controllers (Guards against interrupted play promise errors)
+  const playSafe = useCallback((videoEl) => {
+    if (!videoEl) return;
+    videoEl.muted = isMuted;
+    try {
+      const promise = videoEl.play();
+      if (promise !== undefined) {
+        playPromiseRef.current = promise;
+        promise.catch((err) => {
+          if (err.name === 'AbortError') {
+            return;
+          }
+          console.warn('Autoplay unmuted was restricted, falling back to muted playback:', err);
+          videoEl.muted = true;
+          setIsMuted(true);
+          videoEl.play().catch((playErr) => {
+            if (playErr.name !== 'AbortError') {
+              console.error('Video playback failed:', playErr);
+            }
+          });
+        });
+      }
+    } catch (_) {}
+  }, [isMuted]);
+
+  const pauseSafe = useCallback((videoEl) => {
+    if (!videoEl) return;
+    try {
+      if (playPromiseRef.current) {
+        playPromiseRef.current
+          .then(() => {
+            videoEl.pause();
+          })
+          .catch(() => {
+            videoEl.pause();
+          });
+      } else {
+        videoEl.pause();
+      }
+    } catch (_) {}
+  }, []);
+
+  // Auto-activate audio on first TV remote / keyboard / touch interaction
+  useEffect(() => {
+    const handleFirstInteraction = () => {
+      setIsMuted(false);
+      const activeVideo = activeSlotRef.current === 'A' ? videoARef.current : videoBRef.current;
+      if (activeVideo) {
+        activeVideo.muted = false;
+      }
+    };
+    window.addEventListener('click', handleFirstInteraction, { once: true });
+    window.addEventListener('keydown', handleFirstInteraction, { once: true });
+    window.addEventListener('touchstart', handleFirstInteraction, { once: true });
+    return () => {
+      window.removeEventListener('click', handleFirstInteraction);
+      window.removeEventListener('keydown', handleFirstInteraction);
+      window.removeEventListener('touchstart', handleFirstInteraction);
+    };
+  }, []);
+
+  // Smart Preload for Images
   useEffect(() => {
     if (playlist.length <= 1) return;
     const next1 = playlist[(currentIndex + 1) % playlist.length];
@@ -139,12 +269,10 @@ const VisorTV = () => {
       setError(null);
     }
     try {
-      // In background polling, check version first to avoid unnecessary payload and re-renders
       if (!isInitial && versionHashRef.current) {
         try {
           const versionRes = await playlistService.checkVersion(slug);
           if (versionRes.data.success && versionRes.data.version_hash === versionHashRef.current) {
-            // Version has not changed, do nothing so ongoing playback is completely undisturbed
             return;
           }
         } catch (checkErr) {
@@ -163,6 +291,7 @@ const VisorTV = () => {
           tv_transition_effect: res.data.settings?.tv_transition_effect || 'fade',
         });
         const items = res.data.playlist || [];
+        const prevItems = latestPlaylistRef.current;
         setPlaylist(items);
         latestPlaylistRef.current = items;
         setVersionHash(res.data.version_hash);
@@ -178,9 +307,8 @@ const VisorTV = () => {
             currentIndexRef.current = 0;
           }
         } else {
-          // Background update: if current item is still in playlist, retain current playback without resetting to 0
           if (items.length > 0) {
-            const currentItem = latestPlaylistRef.current[currentIndexRef.current];
+            const currentItem = prevItems[currentIndexRef.current];
             const foundIndex = currentItem ? items.findIndex((it) => it.id === currentItem.id) : -1;
             if (foundIndex !== -1) {
               setCurrentIndex(foundIndex);
@@ -193,7 +321,6 @@ const VisorTV = () => {
                 setSlotAIndex((foundIndex + 1) % items.length);
               }
             } else {
-              // Current item was deleted, advance safely
               const nextSafe = Math.min(currentIndexRef.current, items.length - 1);
               setCurrentIndex(nextSafe);
               currentIndexRef.current = nextSafe;
@@ -265,30 +392,40 @@ const VisorTV = () => {
     };
   }, [handleUserActivity]);
 
-  // Double Buffering Transition
+  // Double Buffering Transition (Smooth A/B Switch without destroying DOM)
   const advanceToSlot = useCallback(
     (targetIndex) => {
       const items = latestPlaylistRef.current;
       if (!items || items.length === 0) return;
+
+      if (items.length === 1) {
+        // Single item loop: do not toggle slots, restart cleanly
+        setCurrentIndex(0);
+        currentIndexRef.current = 0;
+        setProgress(0);
+        const activeVid = activeSlotRef.current === 'A' ? videoARef.current : videoBRef.current;
+        if (activeVid) {
+          try {
+            activeVid.currentTime = 0;
+            playSafe(activeVid);
+          } catch (_) {}
+        }
+        return;
+      }
+
       const validIndex = ((targetIndex % items.length) + items.length) % items.length;
-
-      // Stop and reset any currently playing video immediately to prevent dual audio
-      if (videoARef.current) {
-        try {
-          videoARef.current.pause();
-          videoARef.current.currentTime = 0;
-          videoARef.current.muted = true;
-        } catch (_) {}
-      }
-      if (videoBRef.current) {
-        try {
-          videoBRef.current.pause();
-          videoBRef.current.currentTime = 0;
-          videoBRef.current.muted = true;
-        } catch (_) {}
-      }
-
       const nextSlot = activeSlotRef.current === 'A' ? 'B' : 'A';
+
+      // Soft-pause the outgoing slot's video
+      const currentVideo = activeSlotRef.current === 'A' ? videoARef.current : videoBRef.current;
+      if (currentVideo) {
+        pauseSafe(currentVideo);
+        try {
+          currentVideo.currentTime = 0;
+          currentVideo.muted = true;
+        } catch (_) {}
+      }
+
       if (nextSlot === 'B') {
         setSlotBIndex(validIndex);
         setActiveSlot('B');
@@ -303,7 +440,7 @@ const VisorTV = () => {
       currentIndexRef.current = validIndex;
       setProgress(0);
     },
-    []
+    [pauseSafe, playSafe]
   );
 
   const goToNext = useCallback(() => {
@@ -314,18 +451,31 @@ const VisorTV = () => {
     advanceToSlot(currentIndexRef.current - 1);
   }, [advanceToSlot]);
 
+  // Pre-queue the subsequent item in the inactive slot after transition completes
+  useEffect(() => {
+    if (playlist.length <= 1) return;
+    const timer = setTimeout(() => {
+      const nextIdx = (currentIndex + 1) % playlist.length;
+      if (activeSlot === 'A') {
+        setSlotBIndex(nextIdx);
+      } else {
+        setSlotAIndex(nextIdx);
+      }
+    }, 600);
+    return () => clearTimeout(timer);
+  }, [currentIndex, activeSlot, playlist.length]);
+
   const currentItem = playlist[currentIndex] || null;
   const isEmbedVideo = currentItem?.type === 'video' && !!getEmbedUrl(currentItem?.url);
 
-  // Active Video Playback Controller & Muted Policy Fallback
+  // Active Video Playback Controller
   useEffect(() => {
     const activeVideo = activeSlot === 'A' ? videoARef.current : videoBRef.current;
     const inactiveVideo = activeSlot === 'A' ? videoBRef.current : videoARef.current;
 
-    // Strict audio separation: ensure the inactive slot's video is stopped and muted
     if (inactiveVideo) {
+      pauseSafe(inactiveVideo);
       try {
-        inactiveVideo.pause();
         inactiveVideo.currentTime = 0;
         inactiveVideo.muted = true;
       } catch (_) {}
@@ -335,34 +485,12 @@ const VisorTV = () => {
     if (!activeVideo) return;
 
     if (isPaused) {
-      activeVideo.pause();
+      pauseSafe(activeVideo);
       return;
     }
 
-    activeVideo.muted = isMuted;
-    const playPromise = activeVideo.play();
-    if (playPromise !== undefined) {
-      playPromise.catch((err) => {
-        console.warn('Autoplay unmuted was restricted, falling back to muted playback:', err);
-        activeVideo.muted = true;
-        setIsMuted(true);
-        activeVideo.play().catch((playErr) => {
-          console.error('Video playback completely failed:', playErr);
-        });
-      });
-    }
-  }, [currentIndex, activeSlot, isPaused, isMuted, currentItem, isEmbedVideo]);
-
-  // Lightweight preloader for next playlist item (instant 0ms transitions)
-  useEffect(() => {
-    if (!playlist || playlist.length <= 1) return;
-    const nextIdx = (currentIndex + 1) % playlist.length;
-    const nextMedia = playlist[nextIdx];
-    if (nextMedia && nextMedia.type === 'image' && nextMedia.url) {
-      const preloadImg = new window.Image();
-      preloadImg.src = resolveMediaUrl(nextMedia.url);
-    }
-  }, [currentIndex, playlist]);
+    playSafe(activeVideo);
+  }, [currentIndex, activeSlot, isPaused, isMuted, currentItem, isEmbedVideo, playSafe, pauseSafe]);
 
   // Auto-advance for Images and External Embed Videos
   useEffect(() => {
@@ -391,9 +519,11 @@ const VisorTV = () => {
       }, intervalMs);
     }
 
+    const imgTimer = imageTimerRef.current;
+    const progTimer = progressTimerRef.current;
     return () => {
-      if (imageTimerRef.current) clearInterval(imageTimerRef.current);
-      if (progressTimerRef.current) clearInterval(progressTimerRef.current);
+      if (imgTimer) clearInterval(imgTimer);
+      if (progTimer) clearInterval(progTimer);
     };
   }, [currentItem, isPaused, playlist.length, goToNext, isEmbedVideo]);
 
@@ -407,13 +537,83 @@ const VisorTV = () => {
   };
 
   const handleVideoEnded = () => {
+    if (playlist.length === 1) {
+      // Loop native single item
+      const activeVid = activeSlotRef.current === 'A' ? videoARef.current : videoBRef.current;
+      if (activeVid) {
+        try {
+          activeVid.currentTime = 0;
+          playSafe(activeVid);
+        } catch (_) {}
+      }
+      return;
+    }
     goToNext();
   };
 
-  const handleMediaError = (slot, err) => {
-    console.warn(`Media playback error in Slot ${slot}, skipping to next:`, err);
-    goToNext();
-  };
+  // Debounced error handler with infinite loop prevention (Rule R3.2)
+  const handleMediaError = useCallback(
+    (slot, err) => {
+      console.warn(`Media playback error in Slot ${slot}:`, err);
+      if (errorCooldownRef.current) return;
+      consecutiveErrorsRef.current += 1;
+
+      const items = latestPlaylistRef.current;
+      if (items && items.length > 0 && consecutiveErrorsRef.current >= items.length) {
+        console.error('All media items failed. Halting rapid error cycle.');
+        setError('No se pudo reproducir el contenido multimedia de esta sede.');
+        return;
+      }
+
+      errorCooldownRef.current = setTimeout(() => {
+        errorCooldownRef.current = null;
+        goToNext();
+      }, 1500);
+    },
+    [goToNext]
+  );
+
+  // Anti-Freeze Watchdog (Rule R3.1)
+  useEffect(() => {
+    if (isPaused || playlist.length === 0) return;
+    const activeVideo = activeSlot === 'A' ? videoARef.current : videoBRef.current;
+    const activeItem = playlist[currentIndex];
+    if (!activeVideo || !activeItem || activeItem.type !== 'video' || isEmbedVideo) {
+      stallCounterRef.current = 0;
+      lastTimeRef.current = -1;
+      return;
+    }
+
+    const watchdogInterval = setInterval(() => {
+      if (activeVideo.paused || activeVideo.ended || activeVideo.seeking) {
+        return;
+      }
+      const current = activeVideo.currentTime;
+      if (lastTimeRef.current >= 0 && Math.abs(current - lastTimeRef.current) < 0.1) {
+        stallCounterRef.current += 1;
+        // Stalled for > 4.5 seconds: micro-recovery
+        if (stallCounterRef.current === 5) {
+          console.warn('Watchdog: video stall detected (>4.5s), executing micro-recovery');
+          try {
+            activeVideo.currentTime += 0.05;
+            playSafe(activeVideo);
+          } catch (_) {}
+        }
+        // Stalled for > 6.5 seconds: advance to next item
+        if (stallCounterRef.current >= 7) {
+          console.warn('Watchdog: video remains stalled (>6.5s), forcing advance to next item');
+          stallCounterRef.current = 0;
+          lastTimeRef.current = -1;
+          goToNext();
+        }
+      } else {
+        stallCounterRef.current = 0;
+        lastTimeRef.current = current;
+      }
+    }, 1000);
+
+    return () => clearInterval(watchdogInterval);
+  }, [activeSlot, currentIndex, isPaused, playlist, isEmbedVideo, goToNext, playSafe]);
 
   // Keyboard Shortcuts
   useEffect(() => {
@@ -445,10 +645,7 @@ const VisorTV = () => {
           break;
         case 'a':
         case 'A':
-          setUserFitOverride((prev) => {
-            const current = prev || 'enhanced';
-            return current === 'enhanced' ? 'cover' : current === 'cover' ? 'contain' : 'enhanced';
-          });
+          toggleFitMode();
           break;
         case '?':
         case 'h':
@@ -462,21 +659,7 @@ const VisorTV = () => {
 
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [goToNext, goToPrev]);
-
-  const toggleFullscreen = () => {
-    if (!document.fullscreenElement) {
-      if (containerRef.current?.requestFullscreen) {
-        containerRef.current.requestFullscreen();
-        setIsFullscreen(true);
-      }
-    } else {
-      if (document.exitFullscreen) {
-        document.exitFullscreen();
-        setIsFullscreen(false);
-      }
-    }
-  };
+  }, [goToNext, goToPrev, toggleFullscreen, toggleFitMode]);
 
   // 1. Loading State
   if (isLoading) {
@@ -530,7 +713,6 @@ const VisorTV = () => {
   if (playlist.length === 0) {
     return (
       <div className="h-screen w-screen flex flex-col items-center justify-center p-6 text-center relative overflow-hidden bg-black text-white">
-        {/* Sede Top Header */}
         <div className="absolute top-8 left-8 flex items-center gap-3">
           {isImageUrl(sede.icon) ? (
             <div className="w-12 h-12 rounded-xl border border-white/20 shadow-lg overflow-hidden bg-white/10 shrink-0">
@@ -557,13 +739,11 @@ const VisorTV = () => {
           </div>
         </div>
 
-        {/* Live Clock */}
         <div className="absolute top-8 right-8 flex items-center gap-2 px-4 py-2 rounded-xl border border-slate-800 bg-slate-900/90 text-sm font-mono text-white shadow-xl">
           <Clock className="w-4 h-4 text-rose-500" />
           <span>{currentTime.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}</span>
         </div>
 
-        {/* Center Content */}
         <div className="max-w-lg p-8 rounded-3xl border border-slate-800 bg-slate-900/95 shadow-2xl backdrop-blur-md">
           <div className="w-16 h-16 rounded-2xl bg-rose-500/10 text-rose-500 flex items-center justify-center mx-auto mb-4">
             <Radio className="w-8 h-8 animate-pulse" />
@@ -605,53 +785,54 @@ const VisorTV = () => {
       }`}
       onMouseMove={handleUserActivity}
       onClick={handleUserActivity}
+      onDoubleClick={toggleFullscreen}
     >
-      {/* ================= DOUBLE BUFFERING SLOT A (FULLSCREEN MEDIA) ================= */}
+      {/* ================= DOUBLE BUFFERING SLOT A (PERSISTENT HARDWARE-ACCELERATED) ================= */}
       <div
         className={`absolute inset-0 w-full h-full flex items-center justify-center transition-opacity duration-500 ease-in-out transform-gpu will-change-opacity ${
           activeSlot === 'A' ? 'opacity-100 z-10' : 'opacity-0 z-0 pointer-events-none'
         }`}
       >
         {itemA && itemA.type === 'video' ? (
-          activeSlot === 'A' ? (
-            getEmbedUrl(itemA.url) ? (
-              <iframe
-                src={getEmbedUrl(itemA.url)}
-                className="w-full h-full border-0 pointer-events-none"
-                allow="autoplay; encrypted-media; picture-in-picture"
-                title={itemA.title || 'Embed Video A'}
-              />
-            ) : (
-              <video
-                ref={videoARef}
-                src={resolveMediaUrl(itemA.url)}
-                muted={isMuted}
-                playsInline
-                preload="auto"
-                disablePictureInPicture
-                controlsList="nodownload nofullscreen noremoteplayback"
-                onLoadedData={() => {
-                  if (activeSlot === 'A' && !isPaused) {
-                    videoARef.current?.play().catch(() => {
-                      if (videoARef.current) {
-                        videoARef.current.muted = true;
-                        videoARef.current.play().catch(() => {});
-                      }
-                    });
-                  }
-                }}
-                onTimeUpdate={activeSlot === 'A' ? handleVideoTimeUpdate : undefined}
-                onEnded={activeSlot === 'A' ? handleVideoEnded : undefined}
-                onError={(e) => handleMediaError('A', e)}
-                className={`w-full h-full max-w-full max-h-full transition-all duration-300 ${
-                  getEffectiveFit(itemA) === 'cover' ? 'object-cover' : 'object-contain'
-                } ${getEffectiveFit(itemA) !== 'contain' ? 'tv-video-enhanced' : ''}`}
-                style={{ imageRendering: '-webkit-optimize-contrast' }}
-              />
-            )
-          ) : null
+          getEmbedUrl(itemA.url) ? (
+            <iframe
+              key={`embed-a-${itemA.id}`}
+              src={getEmbedUrl(itemA.url)}
+              className="w-full h-full border-0 pointer-events-none"
+              allow="autoplay; encrypted-media; picture-in-picture"
+              title={itemA.title || 'Embed Video A'}
+            />
+          ) : (
+            <video
+              key={`video-a-${itemA.id}`}
+              ref={videoARef}
+              src={resolveMediaUrl(itemA.url)}
+              muted={isMuted || activeSlot !== 'A'}
+              loop={playlist.length === 1}
+              playsInline
+              preload="auto"
+              disablePictureInPicture
+              controlsList="nodownload nofullscreen noremoteplayback"
+              onLoadedData={() => {
+                if (activeSlot === 'A' && !isPaused) {
+                  playSafe(videoARef.current);
+                }
+              }}
+              onPlaying={() => {
+                consecutiveErrorsRef.current = 0;
+              }}
+              onTimeUpdate={activeSlot === 'A' ? handleVideoTimeUpdate : undefined}
+              onEnded={activeSlot === 'A' ? handleVideoEnded : undefined}
+              onError={(e) => handleMediaError('A', e)}
+              className={`w-full h-full max-w-full max-h-full transition-all duration-300 ${
+                getEffectiveFit(itemA) === 'cover' ? 'object-cover' : 'object-contain'
+              } ${getEffectiveFit(itemA) !== 'contain' ? 'tv-video-enhanced' : ''}`}
+              style={{ imageRendering: '-webkit-optimize-contrast' }}
+            />
+          )
         ) : itemA ? (
           <img
+            key={`img-a-${itemA.id}`}
             src={resolveMediaUrl(itemA.url)}
             alt={itemA.title || 'Visor TV Media A'}
             fetchPriority={activeSlot === 'A' ? 'high' : 'auto'}
@@ -664,52 +845,52 @@ const VisorTV = () => {
         ) : null}
       </div>
 
-      {/* ================= DOUBLE BUFFERING SLOT B (FULLSCREEN MEDIA) ================= */}
+      {/* ================= DOUBLE BUFFERING SLOT B (PERSISTENT HARDWARE-ACCELERATED) ================= */}
       <div
         className={`absolute inset-0 w-full h-full flex items-center justify-center transition-opacity duration-500 ease-in-out transform-gpu will-change-opacity ${
           activeSlot === 'B' ? 'opacity-100 z-10' : 'opacity-0 z-0 pointer-events-none'
         }`}
       >
         {itemB && itemB.type === 'video' ? (
-          activeSlot === 'B' ? (
-            getEmbedUrl(itemB.url) ? (
-              <iframe
-                src={getEmbedUrl(itemB.url)}
-                className="w-full h-full border-0 pointer-events-none"
-                allow="autoplay; encrypted-media; picture-in-picture"
-                title={itemB.title || 'Embed Video B'}
-              />
-            ) : (
-              <video
-                ref={videoBRef}
-                src={resolveMediaUrl(itemB.url)}
-                muted={isMuted}
-                playsInline
-                preload="auto"
-                disablePictureInPicture
-                controlsList="nodownload nofullscreen noremoteplayback"
-                onLoadedData={() => {
-                  if (activeSlot === 'B' && !isPaused) {
-                    videoBRef.current?.play().catch(() => {
-                      if (videoBRef.current) {
-                        videoBRef.current.muted = true;
-                        videoBRef.current.play().catch(() => {});
-                      }
-                    });
-                  }
-                }}
-                onTimeUpdate={activeSlot === 'B' ? handleVideoTimeUpdate : undefined}
-                onEnded={activeSlot === 'B' ? handleVideoEnded : undefined}
-                onError={(e) => handleMediaError('B', e)}
-                className={`w-full h-full max-w-full max-h-full transition-all duration-300 ${
-                  getEffectiveFit(itemB) === 'cover' ? 'object-cover' : 'object-contain'
-                } ${getEffectiveFit(itemB) !== 'contain' ? 'tv-video-enhanced' : ''}`}
-                style={{ imageRendering: '-webkit-optimize-contrast' }}
-              />
-            )
-          ) : null
+          getEmbedUrl(itemB.url) ? (
+            <iframe
+              key={`embed-b-${itemB.id}`}
+              src={getEmbedUrl(itemB.url)}
+              className="w-full h-full border-0 pointer-events-none"
+              allow="autoplay; encrypted-media; picture-in-picture"
+              title={itemB.title || 'Embed Video B'}
+            />
+          ) : (
+            <video
+              key={`video-b-${itemB.id}`}
+              ref={videoBRef}
+              src={resolveMediaUrl(itemB.url)}
+              muted={isMuted || activeSlot !== 'B'}
+              loop={playlist.length === 1}
+              playsInline
+              preload="auto"
+              disablePictureInPicture
+              controlsList="nodownload nofullscreen noremoteplayback"
+              onLoadedData={() => {
+                if (activeSlot === 'B' && !isPaused) {
+                  playSafe(videoBRef.current);
+                }
+              }}
+              onPlaying={() => {
+                consecutiveErrorsRef.current = 0;
+              }}
+              onTimeUpdate={activeSlot === 'B' ? handleVideoTimeUpdate : undefined}
+              onEnded={activeSlot === 'B' ? handleVideoEnded : undefined}
+              onError={(e) => handleMediaError('B', e)}
+              className={`w-full h-full max-w-full max-h-full transition-all duration-300 ${
+                getEffectiveFit(itemB) === 'cover' ? 'object-cover' : 'object-contain'
+              } ${getEffectiveFit(itemB) !== 'contain' ? 'tv-video-enhanced' : ''}`}
+              style={{ imageRendering: '-webkit-optimize-contrast' }}
+            />
+          )
         ) : itemB ? (
           <img
+            key={`img-b-${itemB.id}`}
             src={resolveMediaUrl(itemB.url)}
             alt={itemB.title || 'Visor TV Media B'}
             fetchPriority={activeSlot === 'B' ? 'high' : 'auto'}
@@ -728,6 +909,8 @@ const VisorTV = () => {
           onClick={(e) => {
             e.stopPropagation();
             setIsMuted(false);
+            const activeVideo = activeSlot === 'A' ? videoARef.current : videoBRef.current;
+            if (activeVideo) activeVideo.muted = false;
           }}
           className="absolute top-20 left-1/2 -translate-x-1/2 z-30 flex items-center gap-2 px-5 py-2.5 rounded-full bg-gradient-to-r from-rose-600 to-red-600 hover:from-rose-500 hover:to-red-500 text-white text-xs font-semibold shadow-2xl shadow-rose-600/40 backdrop-blur-md transition-transform hover:scale-105 cursor-pointer"
         >
@@ -742,7 +925,6 @@ const VisorTV = () => {
           showControls ? 'opacity-100' : 'opacity-0 pointer-events-none'
         }`}
       >
-        {/* Sede Info & Back Button */}
         <div className="flex items-center gap-4">
           <button
             onClick={() => navigate('/')}
@@ -859,7 +1041,12 @@ const VisorTV = () => {
 
             {/* Audio Toggle */}
             <button
-              onClick={() => setIsMuted(!isMuted)}
+              onClick={() => {
+                const nextMuted = !isMuted;
+                setIsMuted(nextMuted);
+                const activeVideo = activeSlot === 'A' ? videoARef.current : videoBRef.current;
+                if (activeVideo) activeVideo.muted = nextMuted;
+              }}
               title={isMuted ? 'Activar sonido (M)' : 'Silenciar (M)'}
               className={`p-2.5 rounded-2xl border backdrop-blur-xl transition-colors cursor-pointer ${
                 isMuted
@@ -872,31 +1059,26 @@ const VisorTV = () => {
 
             {/* Aspect Ratio & Quality Mode Toggle */}
             <button
-              onClick={() => {
-                const current = getEffectiveFit(currentItem);
-                const nextMode =
-                  current === 'enhanced' ? 'cover' : current === 'cover' ? 'contain' : 'enhanced';
-                setUserFitOverride(nextMode);
-              }}
+              onClick={toggleFitMode}
               title={`Modo visual: ${
-                getEffectiveFit(currentItem) === 'enhanced'
-                  ? 'Nitidez Pro (Bordes nítidos, contraste optimizado y halo ambiental)'
-                  : getEffectiveFit(currentItem) === 'cover'
-                  ? 'Llenar pantalla completa'
-                  : 'Ajustar original'
+                getEffectiveFit(currentItem) === 'cover'
+                  ? 'Pantalla completa (Llenar pantalla)'
+                  : getEffectiveFit(currentItem) === 'contain'
+                  ? 'Ajustar original (Proporcional)'
+                  : 'Nitidez Pro'
               }`}
               className={`px-3.5 py-2.5 rounded-2xl text-xs font-semibold border backdrop-blur-xl transition-all cursor-pointer ${
-                getEffectiveFit(currentItem) === 'enhanced'
-                  ? 'bg-blue-600/30 text-blue-200 border-blue-400/50 shadow-md shadow-blue-500/20'
+                getEffectiveFit(currentItem) === 'cover'
+                  ? 'bg-rose-600/30 text-rose-200 border-rose-400/50 shadow-md shadow-rose-500/20'
                   : currentTheme.classes.controlBtn
               }`}
             >
               Modo:{' '}
-              {getEffectiveFit(currentItem) === 'enhanced'
-                ? 'Nitidez Pro'
-                : getEffectiveFit(currentItem) === 'cover'
-                ? 'Llenar'
-                : 'Ajustar'}
+              {getEffectiveFit(currentItem) === 'cover'
+                ? 'Pantalla Completa'
+                : getEffectiveFit(currentItem) === 'contain'
+                ? 'Ajustar'
+                : 'Nitidez Pro'}
             </button>
           </div>
 
@@ -977,7 +1159,7 @@ const VisorTV = () => {
                 </kbd>
               </div>
               <div className="flex items-center justify-between py-2 border-b border-slate-800/60 text-sm">
-                <span className="text-slate-300">Modo visual / Nitidez Pro</span>
+                <span className="text-slate-300">Modo visual / Pantalla completa</span>
                 <kbd className="px-2.5 py-1 bg-slate-800 border border-slate-700 rounded-lg text-xs font-mono text-rose-400 font-semibold shadow-xs">
                   A
                 </kbd>
@@ -985,7 +1167,7 @@ const VisorTV = () => {
               <div className="flex items-center justify-between py-2 border-b border-slate-800/60 text-sm">
                 <span className="text-slate-300">Pantalla completa</span>
                 <kbd className="px-2.5 py-1 bg-slate-800 border border-slate-700 rounded-lg text-xs font-mono text-rose-400 font-semibold shadow-xs">
-                  F / F11
+                  F / F11 / Doble Clic
                 </kbd>
               </div>
               <div className="flex items-center justify-between py-2 text-sm">

@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { settingsService, authService, userService } from '../services/api';
+import { settingsService, authService } from '../services/api';
 import { useAuth } from '../context/useAuth';
 import AvatarPickerModal from '../components/AvatarPickerModal';
 import { renderUserAvatar, getCleanAvatarId } from '../utils/avatarUtils';

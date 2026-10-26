@@ -215,4 +215,72 @@ describe('VisorTV component', () => {
     // Background checkVersion returns matching hash: should remain on Video 2
     expect(screen.getByText('2')).toBeInTheDocument();
   });
+
+  it('renders single video with loop attribute and without unmounting', async () => {
+    vi.spyOn(playlistService, 'getPlaylist').mockResolvedValue({
+      data: {
+        success: true,
+        version_hash: 'single-video-hash',
+        sede: { id: 1, name: 'Sede Unica', slug: 'sede-unica' },
+        playlist: [
+          { id: 99, title: 'Solo Video', type: 'video', url: 'https://example.com/solo.mp4' },
+        ],
+        settings: {},
+      },
+    });
+
+    render(
+      <MemoryRouter initialEntries={['/visor/sede-unica']}>
+        <Routes>
+          <Route path="/visor/:slug" element={<VisorTV />} />
+        </Routes>
+      </MemoryRouter>
+    );
+
+    await waitFor(() => {
+      expect(screen.getByText('1')).toBeInTheDocument();
+      expect(screen.getByText('/ 1')).toBeInTheDocument();
+    });
+
+    const videos = document.querySelectorAll('video');
+    expect(videos.length).toBeGreaterThan(0);
+    expect(videos[0].loop).toBe(true);
+  });
+
+  it('persists fit mode in localStorage across video transitions', async () => {
+    localStorage.setItem('visor_tv_fit_mode', 'cover');
+
+    vi.spyOn(playlistService, 'getPlaylist').mockResolvedValue({
+      data: {
+        success: true,
+        version_hash: 'fit-mode-hash',
+        sede: { id: 1, name: 'Sede Fit', slug: 'sede-fit' },
+        playlist: [
+          { id: 1, title: 'Video A', type: 'video', url: 'https://example.com/a.mp4', fit_mode: 'contain' },
+          { id: 2, title: 'Video B', type: 'video', url: 'https://example.com/b.mp4', fit_mode: 'contain' },
+        ],
+        settings: {},
+      },
+    });
+
+    render(
+      <MemoryRouter initialEntries={['/visor/sede-fit']}>
+        <Routes>
+          <Route path="/visor/:slug" element={<VisorTV />} />
+        </Routes>
+      </MemoryRouter>
+    );
+
+    await waitFor(() => {
+      expect(screen.getByText('1')).toBeInTheDocument();
+    });
+
+    // Both videos should maintain object-cover (pantalla completa) because of persisted cover mode
+    const videos = document.querySelectorAll('video');
+    expect(videos[0].className).toContain('object-cover');
+
+    // Toggle fit mode via 'A' key
+    fireEvent.keyDown(window, { key: 'a' });
+    expect(localStorage.getItem('visor_tv_fit_mode')).toBe('contain');
+  });
 });
