@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest';
-import api, { sedesService, playlistService } from '../services/api';
+import api, { sedesService, playlistService, authService } from '../services/api';
 
 describe('Frontend API Services', () => {
   it('has axios configured with defaults and interceptors', () => {
@@ -73,6 +73,28 @@ describe('Frontend API Services', () => {
 
     await mediaService.bulkDelete([10, 20, 30]);
     expect(postSpy).toHaveBeenCalledWith('/media/bulk-delete', { ids: [10, 20, 30] });
+
+    postSpy.mockRestore();
+  });
+
+  it('authService.forgotPassword and authService.resetPassword call corresponding endpoints', async () => {
+    const postSpy = vi.spyOn(api, 'post').mockResolvedValue({ data: { success: true } });
+
+    await authService.forgotPassword('superadmin');
+    expect(postSpy).toHaveBeenCalledWith('/auth/forgot-password', { username: 'superadmin' });
+
+    await authService.resetPassword({
+      username: 'superadmin',
+      code: '123456',
+      new_password: 'new_secret_password',
+      new_password_confirmation: 'new_secret_password',
+    });
+    expect(postSpy).toHaveBeenCalledWith('/auth/reset-password', {
+      username: 'superadmin',
+      code: '123456',
+      new_password: 'new_secret_password',
+      new_password_confirmation: 'new_secret_password',
+    });
 
     postSpy.mockRestore();
   });
