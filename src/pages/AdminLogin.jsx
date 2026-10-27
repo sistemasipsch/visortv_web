@@ -113,6 +113,9 @@ const AdminLogin = () => {
       }
       setEmailHint(data.email_hint || '');
       setDevCode(data.dev_code || '');
+      if (data.dev_code) {
+        setForgotCode(data.dev_code);
+      }
       setForgotSuccessMsg(data.message || 'Código generado correctamente.');
       setForgotStep(2);
     } catch (err) {
@@ -393,9 +396,12 @@ const AdminLogin = () => {
                 </p>
               )}
               {devCode && (
-                <div className="mt-2 p-2 rounded-xl bg-amber-50 border border-amber-200 text-amber-900 text-[11px] flex items-center justify-between">
-                  <span>Código de verificación generado:</span>
-                  <span className="font-mono font-black text-sm tracking-widest text-amber-700 bg-white px-2 py-0.5 rounded-lg border border-amber-200">
+                <div className="mt-2 p-2.5 rounded-xl bg-amber-50 border border-amber-200 text-amber-900 text-[11px] flex items-center justify-between">
+                  <div className="flex flex-col">
+                    <span className="font-bold">Código de verificación generado:</span>
+                    <span className="text-[10px] text-amber-700">Pre-cargado automáticamente</span>
+                  </div>
+                  <span className="font-mono font-black text-sm tracking-widest text-amber-700 bg-white px-2.5 py-1 rounded-lg border border-amber-200 shadow-xs">
                     {devCode}
                   </span>
                 </div>
