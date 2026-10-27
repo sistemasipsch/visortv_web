@@ -68,7 +68,7 @@ describe('AdminLogin Component and Password Recovery', () => {
     await waitFor(() => {
       expect(screen.getByRole('heading', { name: 'Nueva Contraseña' })).toBeInTheDocument();
       expect(screen.getByText(/Restableciendo usuario: @admin/i)).toBeInTheDocument();
-      expect(screen.getByText(/654321/)).toBeInTheDocument();
+      expect(screen.getByText(/nexacoreipsch@gmail\.com/i)).toBeInTheDocument();
       expect(screen.getByPlaceholderText('123456')).toBeInTheDocument();
       expect(screen.getByPlaceholderText('Mínimo 6 caracteres')).toBeInTheDocument();
     });

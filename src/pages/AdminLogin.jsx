@@ -113,10 +113,8 @@ const AdminLogin = () => {
       }
       setEmailHint(data.email_hint || '');
       setDevCode(data.dev_code || '');
-      if (data.dev_code) {
-        setForgotCode(data.dev_code);
-      }
-      setForgotSuccessMsg(data.message || 'Código generado correctamente.');
+      setForgotCode('');
+      setForgotSuccessMsg(data.message || 'Código enviado correctamente a su correo.');
       setForgotStep(2);
     } catch (err) {
       console.error('Forgot password error:', err);
@@ -387,7 +385,7 @@ const AdminLogin = () => {
               </div>
               {emailHint ? (
                 <p className="text-slate-600 flex items-center gap-1.5">
-                  <Mail className="w-3.5 h-3.5 text-blue-500" />
+                  <Mail className="w-3.5 h-3.5 text-blue-500 shrink-0" />
                   <span>Código enviado a: <strong className="text-slate-800">{emailHint}</strong></span>
                 </p>
               ) : (
@@ -395,17 +393,12 @@ const AdminLogin = () => {
                   Validez del código: 15 minutos.
                 </p>
               )}
-              {devCode && (
-                <div className="mt-2 p-2.5 rounded-xl bg-amber-50 border border-amber-200 text-amber-900 text-[11px] flex items-center justify-between">
-                  <div className="flex flex-col">
-                    <span className="font-bold">Código de verificación generado:</span>
-                    <span className="text-[10px] text-amber-700">Pre-cargado automáticamente</span>
-                  </div>
-                  <span className="font-mono font-black text-sm tracking-widest text-amber-700 bg-white px-2.5 py-1 rounded-lg border border-amber-200 shadow-xs">
-                    {devCode}
-                  </span>
-                </div>
-              )}
+              <div className="mt-2 pt-2 border-t border-blue-200/60 text-[11px] text-slate-600 leading-relaxed">
+                Remitente: <strong className="text-[#0049EA]">nexacoreipsch@gmail.com</strong>.
+                <span className="block text-slate-500 mt-0.5">
+                  Por favor revisa tu bandeja de entrada o carpeta de spam y escribe los 6 dígitos a continuación:
+                </span>
+              </div>
             </div>
 
             {forgotError && (
