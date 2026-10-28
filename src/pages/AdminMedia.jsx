@@ -675,7 +675,17 @@ const AdminMedia = () => {
                     {item.created_at_human && (
                       <span className="text-slate-400">{item.created_at_human}</span>
                     )}
-                    <span>Tamaño: {item.formatted_size}</span>
+                    {item.type === 'video' && item.file_size > 50 * 1024 * 1024 ? (
+                      <span className="text-amber-800 bg-amber-50 px-2 py-0.5 rounded border border-amber-200 font-semibold" title="Video pesado (>50MB). Se recomienda optimizar a 1080p para máxima fluidez en Smart TVs">
+                        Tamaño: {item.formatted_size} ⚠️ Pesado
+                      </span>
+                    ) : item.type === 'video' && item.file_size > 0 && item.file_size <= 25 * 1024 * 1024 ? (
+                      <span className="text-emerald-700 bg-emerald-50 px-2 py-0.5 rounded border border-emerald-100 font-medium" title="Tamaño óptimo para streaming instantáneo en Smart TVs">
+                        Tamaño: {item.formatted_size} (Óptimo)
+                      </span>
+                    ) : (
+                      <span>Tamaño: {item.formatted_size}</span>
+                    )}
                     {item.type === 'image' ? (
                       <span className="flex items-center gap-1 text-slate-600">
                         <Clock className="w-3 h-3 text-indigo-600" />

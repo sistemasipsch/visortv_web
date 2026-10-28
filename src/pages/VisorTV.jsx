@@ -33,6 +33,36 @@ const getEmbedUrl = (url) => {
   return null;
 };
 
+// Isolated micro-component for the live clock: renders independently so ticking seconds never cause VisorTV re-renders
+const TVClock = React.memo(({ themeClass, isStandby = false }) => {
+  const [time, setTime] = useState(new Date());
+
+  useEffect(() => {
+    const timer = setInterval(() => {
+      setTime(new Date());
+    }, 1000);
+    return () => clearInterval(timer);
+  }, []);
+
+  if (isStandby) {
+    return (
+      <div className="absolute top-8 right-8 flex items-center gap-2 px-4 py-2 rounded-xl border border-slate-800 bg-slate-900/90 text-sm font-mono text-white shadow-xl">
+        <Clock className="w-4 h-4 text-rose-500" />
+        <span>{time.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}</span>
+      </div>
+    );
+  }
+
+  return (
+    <div className={`flex items-center gap-2 px-4 py-2 rounded-2xl border text-xs font-mono shadow-xl ${themeClass}`}>
+      <Clock className="w-3.5 h-3.5 text-rose-500" />
+      <span className="font-semibold capitalize">
+        {time.toLocaleDateString('es-ES', { weekday: 'short', day: 'numeric', month: 'short' })} • {time.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}
+      </span>
+    </div>
+  );
+});
+
 const VisorTV = () => {
   const { slug } = useParams();
   const navigate = useNavigate();
@@ -64,10 +94,20 @@ const VisorTV = () => {
 
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [showControls, setShowControls] = useState(true);
-  const [currentTime, setCurrentTime] = useState(new Date());
-  const [progress, setProgress] = useState(0);
   const [versionHash, setVersionHash] = useState('');
   const [showHelpModal, setShowHelpModal] = useState(false);
+
+  // Direct DOM Refs for Progress Bars (0 React re-renders during video playback)
+  const ambientProgressRef = useRef(null);
+  const controlProgressRef = useRef(null);
+  const lastActivityRef = useRef(0);
+
+  const updateProgressDom = useCallback((pct) => {
+    const clamped = Math.min(Math.max(pct, 0), 100);
+    const widthStr = `${clamped}%`;
+    if (ambientProgressRef.current) ambientProgressRef.current.style.width = widthStr;
+    if (controlProgressRef.current) controlProgressRef.current.style.width = widthStr;
+  }, []);
 
   // Double Buffering (Slot A & Slot B) State
   const [activeSlot, setActiveSlot] = useState('A');
@@ -364,16 +404,12 @@ const VisorTV = () => {
     return () => clearInterval(interval);
   }, [settings.tv_auto_refresh_seconds, loadPlaylist]);
 
-  // Clock Timer
-  useEffect(() => {
-    const timer = setInterval(() => {
-      setCurrentTime(new Date());
-    }, 1000);
-    return () => clearInterval(timer);
-  }, []);
-
-  // Controls Visibility Timeout
+  // Controls Visibility Timeout with Activity Throttling (saves TV CPU)
   const handleUserActivity = useCallback(() => {
+    const now = Date.now();
+    if (now - lastActivityRef.current < 250) return;
+    lastActivityRef.current = now;
+
     setShowControls(true);
     if (controlsTimeoutRef.current) {
       clearTimeout(controlsTimeoutRef.current);
@@ -386,8 +422,8 @@ const VisorTV = () => {
   useEffect(() => {
     const handleMouseMove = () => handleUserActivity();
     const handleKeyDown = () => handleUserActivity();
-    window.addEventListener('mousemove', handleMouseMove);
-    window.addEventListener('keydown', handleKeyDown);
+    window.addEventListener('mousemove', handleMouseMove, { passive: true });
+    window.addEventListener('keydown', handleKeyDown, { passive: true });
     return () => {
       window.removeEventListener('mousemove', handleMouseMove);
       window.removeEventListener('keydown', handleKeyDown);
@@ -407,7 +443,7 @@ const VisorTV = () => {
         // Single item loop: do not toggle slots, restart cleanly in place
         setCurrentIndex(0);
         currentIndexRef.current = 0;
-        setProgress(0);
+        updateProgressDom(0);
         const activeVid = activeSlotRef.current === 'A' ? videoARef.current : videoBRef.current;
         if (activeVid) {
           try {
@@ -470,7 +506,7 @@ const VisorTV = () => {
         activeSlotRef.current = nextSlot;
         setCurrentIndex(validIndex);
         currentIndexRef.current = validIndex;
-        setProgress(0);
+        updateProgressDom(0);
 
         // After cross-fade duration (550ms):
         // 1. Soft-pause outgoing video without resetting its frame
@@ -613,7 +649,7 @@ const VisorTV = () => {
       progressTimerRef.current = setInterval(() => {
         elapsedMs += intervalMs;
         const pct = Math.min((elapsedMs / totalMs) * 100, 100);
-        setProgress(pct);
+        updateProgressDom(pct);
 
         if (elapsedMs >= totalMs) {
           clearInterval(progressTimerRef.current);
@@ -628,14 +664,14 @@ const VisorTV = () => {
       if (imgTimer) clearInterval(imgTimer);
       if (progTimer) clearInterval(progTimer);
     };
-  }, [currentItem, isPaused, playlist.length, goToNext, isEmbedVideo]);
+  }, [currentItem, isPaused, playlist.length, goToNext, isEmbedVideo, updateProgressDom]);
 
-  // Video Time Update & Ended Handlers
+  // Video Time Update & Ended Handlers (0 React re-renders via direct DOM updates)
   const handleVideoTimeUpdate = (e) => {
     const video = e.target;
     if (video && video.duration > 0) {
       const pct = (video.currentTime / video.duration) * 100;
-      setProgress(Math.min(pct, 100));
+      updateProgressDom(pct);
     }
   };
 
@@ -856,10 +892,7 @@ const VisorTV = () => {
           </div>
         </div>
 
-        <div className="absolute top-8 right-8 flex items-center gap-2 px-4 py-2 rounded-xl border border-slate-800 bg-slate-900/90 text-sm font-mono text-white shadow-xl">
-          <Clock className="w-4 h-4 text-rose-500" />
-          <span>{currentTime.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}</span>
-        </div>
+        <TVClock isStandby={true} />
 
         <div className="max-w-lg p-8 rounded-3xl border border-slate-800 bg-slate-900/95 shadow-2xl backdrop-blur-md">
           <div className="w-16 h-16 rounded-2xl bg-rose-500/10 text-rose-500 flex items-center justify-center mx-auto mb-4">
@@ -1095,15 +1128,10 @@ const VisorTV = () => {
         {/* Live Clock & Playlist Counter */}
         <div className="flex items-center gap-3">
           {settings.tv_show_clock && (
-            <div className={`flex items-center gap-2 px-4 py-2 rounded-2xl border text-xs font-mono backdrop-blur-xl shadow-xl ${currentTheme.classes.clock}`}>
-              <Clock className="w-3.5 h-3.5 text-rose-500" />
-              <span className="font-semibold capitalize">
-                {currentTime.toLocaleDateString('es-ES', { weekday: 'short', day: 'numeric', month: 'short' })} • {currentTime.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}
-              </span>
-            </div>
+            <TVClock themeClass={currentTheme.classes.clock} />
           )}
 
-          <div className={`px-4 py-2 rounded-2xl border text-xs font-semibold backdrop-blur-xl shadow-xl ${currentTheme.classes.counter}`}>
+          <div className={`px-4 py-2 rounded-2xl border text-xs font-semibold shadow-xl ${currentTheme.classes.counter}`}>
             <span className="font-bold text-rose-400">{currentIndex + 1}</span> / {playlist.length}
           </div>
         </div>
@@ -1113,8 +1141,9 @@ const VisorTV = () => {
       {!showControls && settings.tv_show_progress_bar && (
         <div className="absolute bottom-0 left-0 right-0 h-1 bg-black/40 z-10 pointer-events-none">
           <div
+            ref={ambientProgressRef}
             className={`h-full transition-all duration-150 ease-linear ${currentTheme.classes.progressBar}`}
-            style={{ width: `${progress}%` }}
+            style={{ width: '0%' }}
           />
         </div>
       )}
@@ -1125,12 +1154,13 @@ const VisorTV = () => {
           showControls ? 'opacity-100' : 'opacity-0 pointer-events-none'
         }`}
       >
-        {/* Progress Bar */}
+        {/* Progress Bar (Hardware-Accelerated Direct DOM Updates) */}
         {settings.tv_show_progress_bar && (
-          <div className="w-full h-1.5 rounded-full overflow-hidden backdrop-blur-xs bg-slate-800/80 shadow-inner">
+          <div className="w-full h-1.5 rounded-full overflow-hidden bg-slate-800/80 shadow-inner">
             <div
+              ref={controlProgressRef}
               className={`h-full transition-all duration-150 ease-linear rounded-full ${currentTheme.classes.progressBar}`}
-              style={{ width: `${progress}%` }}
+              style={{ width: '0%' }}
             />
           </div>
         )}
