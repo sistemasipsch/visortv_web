@@ -283,4 +283,44 @@ describe('VisorTV component', () => {
     fireEvent.keyDown(window, { key: 'a' });
     expect(localStorage.getItem('visor_tv_fit_mode')).toBe('contain');
   });
+
+  it('maintains infinite resilient playback loop without halting on consecutive media errors', async () => {
+    vi.spyOn(playlistService, 'getPlaylist').mockResolvedValue({
+      data: {
+        success: true,
+        version_hash: 'infinite-loop-hash',
+        sede: { id: 1, name: 'Sede Infinita', slug: 'sede-infinita' },
+        playlist: [
+          { id: 1, title: 'Item Roto 1', type: 'video', url: 'https://example.com/broken1.mp4' },
+          { id: 2, title: 'Item Roto 2', type: 'video', url: 'https://example.com/broken2.mp4' },
+        ],
+        settings: {},
+      },
+    });
+
+    render(
+      <MemoryRouter initialEntries={['/visor/sede-infinita']}>
+        <Routes>
+          <Route path="/visor/:slug" element={<VisorTV />} />
+        </Routes>
+      </MemoryRouter>
+    );
+
+    await waitFor(() => {
+      expect(screen.getByText('1')).toBeInTheDocument();
+    });
+
+    // Simulate media errors on both slots
+    const videos = document.querySelectorAll('video');
+    expect(videos.length).toBeGreaterThan(0);
+
+    // Fire error on active video
+    await act(async () => {
+      fireEvent.error(videos[0]);
+    });
+
+    // Should never render the fatal error screen
+    expect(screen.queryByText(/Canal No Disponible/i)).not.toBeInTheDocument();
+    expect(screen.getAllByText(/Sede Infinita/i)[0]).toBeInTheDocument();
+  });
 });

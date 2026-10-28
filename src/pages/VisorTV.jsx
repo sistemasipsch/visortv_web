@@ -91,6 +91,11 @@ const VisorTV = () => {
   const consecutiveErrorsRef = useRef(0);
   const errorCooldownRef = useRef(null);
 
+  // Transition & Sychronization Refs (Zero-Black-Screen Engine)
+  const transitionInProgressRef = useRef(false);
+  const transitionTimeoutRef = useRef(null);
+  const pendingTransitionRef = useRef(null);
+
   // Stall Watchdog Refs
   const stallCounterRef = useRef(0);
   const lastTimeRef = useRef(-1);
@@ -392,14 +397,14 @@ const VisorTV = () => {
     };
   }, [handleUserActivity]);
 
-  // Double Buffering Transition (Smooth A/B Switch without destroying DOM)
+  // Double Buffering Transition (Seamless Zero-Black-Screen A/B Switch)
   const advanceToSlot = useCallback(
-    (targetIndex) => {
+    (targetIndex, forceImmediate = false) => {
       const items = latestPlaylistRef.current;
       if (!items || items.length === 0) return;
 
       if (items.length === 1) {
-        // Single item loop: do not toggle slots, restart cleanly
+        // Single item loop: do not toggle slots, restart cleanly in place
         setCurrentIndex(0);
         currentIndexRef.current = 0;
         setProgress(0);
@@ -413,43 +418,142 @@ const VisorTV = () => {
         return;
       }
 
-      const validIndex = ((targetIndex % items.length) + items.length) % items.length;
-      const nextSlot = activeSlotRef.current === 'A' ? 'B' : 'A';
-
-      // Soft-pause the outgoing slot's video
-      const currentVideo = activeSlotRef.current === 'A' ? videoARef.current : videoBRef.current;
-      if (currentVideo) {
-        pauseSafe(currentVideo);
-        try {
-          currentVideo.currentTime = 0;
-          currentVideo.muted = true;
-        } catch (_) {}
+      if (transitionInProgressRef.current) {
+        if (!forceImmediate) {
+          return;
+        }
+        if (transitionTimeoutRef.current) {
+          clearTimeout(transitionTimeoutRef.current);
+          transitionTimeoutRef.current = null;
+        }
       }
 
+      const validIndex = ((targetIndex % items.length) + items.length) % items.length;
+      const currentSlot = activeSlotRef.current;
+      const nextSlot = currentSlot === 'A' ? 'B' : 'A';
+      const nextItem = items[validIndex];
+      if (!nextItem) return;
+
+      transitionInProgressRef.current = true;
+
+      // Stage the target index in the target slot
       if (nextSlot === 'B') {
         setSlotBIndex(validIndex);
-        setActiveSlot('B');
-        activeSlotRef.current = 'B';
       } else {
         setSlotAIndex(validIndex);
-        setActiveSlot('A');
-        activeSlotRef.current = 'A';
       }
 
-      setCurrentIndex(validIndex);
-      currentIndexRef.current = validIndex;
-      setProgress(0);
+      let transitionCompleted = false;
+
+      // Helper to finalize the visual cross-fade and queue the following item
+      const completeTransition = () => {
+        if (transitionCompleted) return;
+        transitionCompleted = true;
+
+        if (transitionTimeoutRef.current) {
+          clearTimeout(transitionTimeoutRef.current);
+          transitionTimeoutRef.current = null;
+        }
+        pendingTransitionRef.current = null;
+
+        const incomingVideo = nextSlot === 'B' ? videoBRef.current : videoARef.current;
+        const outgoingVideo = currentSlot === 'A' ? videoARef.current : videoBRef.current;
+
+        // Unmute incoming if sound is active
+        if (incomingVideo) {
+          incomingVideo.muted = isMuted;
+        }
+
+        // Switch visible active slot: incoming slot fades in (0 -> 100), outgoing slot fades out (100 -> 0)
+        // Outgoing media holds its last frame cleanly on display during the entire 500ms crossfade!
+        setActiveSlot(nextSlot);
+        activeSlotRef.current = nextSlot;
+        setCurrentIndex(validIndex);
+        currentIndexRef.current = validIndex;
+        setProgress(0);
+
+        // After cross-fade duration (550ms):
+        // 1. Soft-pause outgoing video without resetting its frame
+        // 2. Stage the next subsequent item (validIndex + 1) in the newly invisible slot
+        setTimeout(() => {
+          if (outgoingVideo) {
+            pauseSafe(outgoingVideo);
+            try {
+              outgoingVideo.muted = true;
+            } catch (_) {}
+          }
+
+          const subsequentIndex = (validIndex + 1) % items.length;
+          if (currentSlot === 'A') {
+            setSlotAIndex(subsequentIndex);
+          } else {
+            setSlotBIndex(subsequentIndex);
+          }
+
+          transitionInProgressRef.current = false;
+        }, 550);
+      };
+
+      pendingTransitionRef.current = { slot: nextSlot, complete: completeTransition };
+
+      const isNextEmbed = nextItem.type === 'video' && !!getEmbedUrl(nextItem.url);
+
+      if (nextItem.type === 'video' && !isNextEmbed) {
+        // Target is a video: start it in background and wait for 'playing' or buffer
+        const targetVideo = nextSlot === 'B' ? videoBRef.current : videoARef.current;
+
+        // Safety fallback timer: if heavy video buffers > 7s or decoder lags, proceed anyway
+        transitionTimeoutRef.current = setTimeout(() => {
+          console.warn('Transition timeout: proceeding to crossfade after buffer delay');
+          completeTransition();
+        }, 7000);
+
+        if (targetVideo) {
+          try {
+            targetVideo.muted = true;
+            const playPromise = targetVideo.play();
+            if (playPromise !== undefined) {
+              playPromise
+                .then(() => {
+                  completeTransition();
+                })
+                .catch(() => {
+                  targetVideo.muted = true;
+                  targetVideo
+                    .play()
+                    .then(() => completeTransition())
+                    .catch(() => completeTransition());
+                });
+            } else {
+              completeTransition();
+            }
+          } catch (_) {
+            completeTransition();
+          }
+        } else {
+          setTimeout(completeTransition, 50);
+        }
+      } else {
+        // Target is an image or external embed: crossfade immediately with preloaded asset
+        completeTransition();
+      }
     },
-    [pauseSafe, playSafe]
+    [pauseSafe, playSafe, isMuted]
   );
 
-  const goToNext = useCallback(() => {
-    advanceToSlot(currentIndexRef.current + 1);
-  }, [advanceToSlot]);
+  const goToNext = useCallback(
+    (force = true) => {
+      advanceToSlot(currentIndexRef.current + 1, force);
+    },
+    [advanceToSlot]
+  );
 
-  const goToPrev = useCallback(() => {
-    advanceToSlot(currentIndexRef.current - 1);
-  }, [advanceToSlot]);
+  const goToPrev = useCallback(
+    (force = true) => {
+      advanceToSlot(currentIndexRef.current - 1, force);
+    },
+    [advanceToSlot]
+  );
 
   // Pre-queue the subsequent item in the inactive slot after transition completes
   useEffect(() => {
@@ -473,10 +577,9 @@ const VisorTV = () => {
     const activeVideo = activeSlot === 'A' ? videoARef.current : videoBRef.current;
     const inactiveVideo = activeSlot === 'A' ? videoBRef.current : videoARef.current;
 
-    if (inactiveVideo) {
+    if (inactiveVideo && !transitionInProgressRef.current) {
       pauseSafe(inactiveVideo);
       try {
-        inactiveVideo.currentTime = 0;
         inactiveVideo.muted = true;
       } catch (_) {}
     }
@@ -551,29 +654,24 @@ const VisorTV = () => {
     goToNext();
   };
 
-  // Debounced error handler with infinite loop prevention (Rule R3.2)
+  // Debounced error handler with infinite loop resilience (Rule R3.2)
   const handleMediaError = useCallback(
     (slot, err) => {
       console.warn(`Media playback error in Slot ${slot}:`, err);
       if (errorCooldownRef.current) return;
       consecutiveErrorsRef.current += 1;
 
-      const items = latestPlaylistRef.current;
-      if (items && items.length > 0 && consecutiveErrorsRef.current >= items.length) {
-        console.error('All media items failed. Halting rapid error cycle.');
-        setError('No se pudo reproducir el contenido multimedia de esta sede.');
-        return;
-      }
-
+      // Never halt or display fatal error screen on TVs; continue the infinite cycle seamlessly
       errorCooldownRef.current = setTimeout(() => {
         errorCooldownRef.current = null;
+        transitionInProgressRef.current = false;
         goToNext();
       }, 1500);
     },
     [goToNext]
   );
 
-  // Anti-Freeze Watchdog (Rule R3.1)
+  // Anti-Freeze & Buffer Stall Watchdog (Rule R3.1)
   useEffect(() => {
     if (isPaused || playlist.length === 0) return;
     const activeVideo = activeSlot === 'A' ? videoARef.current : videoBRef.current;
@@ -585,23 +683,42 @@ const VisorTV = () => {
     }
 
     const watchdogInterval = setInterval(() => {
-      if (activeVideo.paused || activeVideo.ended || activeVideo.seeking) {
+      if (isPaused || activeVideo.ended || transitionInProgressRef.current) {
         return;
       }
+
       const current = activeVideo.currentTime;
+
+      // Case 1: Video is unexpectedly paused (e.g. TV buffer underrun or blocked autoplay)
+      if (activeVideo.paused) {
+        stallCounterRef.current += 1;
+        if (stallCounterRef.current >= 3) {
+          console.warn('Watchdog: active video paused unexpectedly, attempting playSafe recovery');
+          playSafe(activeVideo);
+        }
+        if (stallCounterRef.current >= 7) {
+          console.warn('Watchdog: active video stuck paused for >7s, forcing advance to next item');
+          stallCounterRef.current = 0;
+          lastTimeRef.current = -1;
+          goToNext();
+        }
+        return;
+      }
+
+      // Case 2: Video is playing, but currentTime is not advancing (frozen decoder or stalled chunk)
       if (lastTimeRef.current >= 0 && Math.abs(current - lastTimeRef.current) < 0.1) {
         stallCounterRef.current += 1;
-        // Stalled for > 4.5 seconds: micro-recovery
-        if (stallCounterRef.current === 5) {
-          console.warn('Watchdog: video stall detected (>4.5s), executing micro-recovery');
+        // Stalled for > 4 seconds: micro-recovery nudge
+        if (stallCounterRef.current === 4) {
+          console.warn('Watchdog: video stall detected (>4s), executing micro-recovery');
           try {
             activeVideo.currentTime += 0.05;
             playSafe(activeVideo);
           } catch (_) {}
         }
-        // Stalled for > 6.5 seconds: advance to next item
+        // Stalled for > 7 seconds: force advance to next item
         if (stallCounterRef.current >= 7) {
-          console.warn('Watchdog: video remains stalled (>6.5s), forcing advance to next item');
+          console.warn('Watchdog: video remains stalled (>7s), forcing advance to next item');
           stallCounterRef.current = 0;
           lastTimeRef.current = -1;
           goToNext();
@@ -820,6 +937,9 @@ const VisorTV = () => {
               }}
               onPlaying={() => {
                 consecutiveErrorsRef.current = 0;
+                if (pendingTransitionRef.current?.slot === 'A') {
+                  pendingTransitionRef.current.complete();
+                }
               }}
               onTimeUpdate={activeSlot === 'A' ? handleVideoTimeUpdate : undefined}
               onEnded={activeSlot === 'A' ? handleVideoEnded : undefined}
@@ -878,6 +998,9 @@ const VisorTV = () => {
               }}
               onPlaying={() => {
                 consecutiveErrorsRef.current = 0;
+                if (pendingTransitionRef.current?.slot === 'B') {
+                  pendingTransitionRef.current.complete();
+                }
               }}
               onTimeUpdate={activeSlot === 'B' ? handleVideoTimeUpdate : undefined}
               onEnded={activeSlot === 'B' ? handleVideoEnded : undefined}
