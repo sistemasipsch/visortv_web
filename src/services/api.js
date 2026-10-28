@@ -266,7 +266,8 @@ export const mediaService = {
     try {
       return await api.delete(`/media/${id}`);
     } catch (err) {
-      if (err.response?.status === 405 || err.response?.status === 404 || !err.response) {
+      // Fallback on Method Not Allowed (405), Forbidden (403), Not Found (404 proxy quirk), or network failure
+      if (err.response?.status === 405 || err.response?.status === 403 || err.response?.status === 404 || !err.response) {
         return await api.post(`/media/${id}/delete`);
       }
       throw err;
@@ -274,7 +275,12 @@ export const mediaService = {
   },
 
   bulkDelete: async (ids) => {
-    return await api.post('/media/bulk-delete', { ids });
+    const cleanIds = (Array.isArray(ids) ? ids : []).map(Number).filter((n) => !isNaN(n) && n > 0);
+    return await api.post('/media/bulk-delete', { ids: cleanIds });
+  },
+
+  optimizeImages: async () => {
+    return await api.post('/media/optimize-images');
   },
 
   reorder: async (orders) => {

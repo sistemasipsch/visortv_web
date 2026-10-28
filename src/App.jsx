@@ -1,9 +1,20 @@
-import React from 'react';
+import React, { Suspense, lazy } from 'react';
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { AuthProvider } from './context/AuthContext';
 import { useAuth } from './context/useAuth';
 
-import { Suspense, lazy } from 'react';
+// Ultra-fast client cache configuration
+export const queryClient = new QueryClient({
+  defaultOptions: {
+    queries: {
+      staleTime: 5 * 60 * 1000, // 5 minutes cache
+      gcTime: 15 * 60 * 1000,
+      refetchOnWindowFocus: false,
+      retry: 1,
+    },
+  },
+});
 
 // Lazy-loaded Pages for Maximum Performance & Instant Load
 const SedesSelection = lazy(() => import('./pages/SedesSelection'));
@@ -68,56 +79,58 @@ const SuperadminRoute = ({ children }) => {
 
 function App() {
   return (
-    <AuthProvider>
-      <BrowserRouter>
-        <Suspense fallback={<PageLoader />}>
-          <Routes>
-            {/* Public / TV Kiosk Routes */}
-            <Route path="/" element={<SedesSelection />} />
-            <Route path="/sedes" element={<SedesSelection />} />
-            <Route path="/visor/:slug" element={<VisorTV />} />
-            <Route path="/tv/:slug" element={<VisorTV />} />
+    <QueryClientProvider client={queryClient}>
+      <AuthProvider>
+        <BrowserRouter>
+          <Suspense fallback={<PageLoader />}>
+            <Routes>
+              {/* Public / TV Kiosk Routes */}
+              <Route path="/" element={<SedesSelection />} />
+              <Route path="/sedes" element={<SedesSelection />} />
+              <Route path="/visor/:slug" element={<VisorTV />} />
+              <Route path="/tv/:slug" element={<VisorTV />} />
 
-            {/* Admin Authentication */}
-            <Route path="/admin/login" element={<AdminLogin />} />
+              {/* Admin Authentication */}
+              <Route path="/admin/login" element={<AdminLogin />} />
 
-            {/* Admin Protected Dashboard Routes */}
-            <Route
-              path="/admin"
-              element={
-                <ProtectedRoute>
-                  <AdminLayout />
-                </ProtectedRoute>
-              }
-            >
-              <Route index element={<AdminDashboard />} />
-              <Route path="sedes" element={<AdminSedes />} />
-              <Route path="media" element={<AdminMedia />} />
+              {/* Admin Protected Dashboard Routes */}
               <Route
-                path="users"
+                path="/admin"
                 element={
-                  <SuperadminRoute>
-                    <AdminUsers />
-                  </SuperadminRoute>
+                  <ProtectedRoute>
+                    <AdminLayout />
+                  </ProtectedRoute>
                 }
-              />
-              <Route
-                path="audit"
-                element={
-                  <SuperadminRoute>
-                    <AdminAudit />
-                  </SuperadminRoute>
-                }
-              />
-              <Route path="settings" element={<AdminSettings />} />
-            </Route>
+              >
+                <Route index element={<AdminDashboard />} />
+                <Route path="sedes" element={<AdminSedes />} />
+                <Route path="media" element={<AdminMedia />} />
+                <Route
+                  path="users"
+                  element={
+                    <SuperadminRoute>
+                      <AdminUsers />
+                    </SuperadminRoute>
+                  }
+                />
+                <Route
+                  path="audit"
+                  element={
+                    <SuperadminRoute>
+                      <AdminAudit />
+                    </SuperadminRoute>
+                  }
+                />
+                <Route path="settings" element={<AdminSettings />} />
+              </Route>
 
-            {/* Fallback */}
-            <Route path="*" element={<Navigate to="/" replace />} />
-          </Routes>
-        </Suspense>
-      </BrowserRouter>
-    </AuthProvider>
+              {/* Fallback */}
+              <Route path="*" element={<Navigate to="/" replace />} />
+            </Routes>
+          </Suspense>
+        </BrowserRouter>
+      </AuthProvider>
+    </QueryClientProvider>
   );
 }
 

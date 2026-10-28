@@ -1,5 +1,7 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { useSearchParams } from 'react-router-dom';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
+import imageCompression from 'browser-image-compression';
 import { mediaService, resolveMediaUrl } from '../services/api';
 import Modal from '../components/Modal';
 import {
@@ -18,29 +20,57 @@ import {
   Tv,
   Clock,
   Link2,
-  Plus,
   Globe,
   Sparkles,
+  Image as ImageIcon,
 } from 'lucide-react';
 
 const AdminMedia = () => {
   const [searchParams, setSearchParams] = useSearchParams();
-  const initialSedeId = searchParams.get('sede_id') || '';
+  const initialSedeId = searchParams.get('sede_id') || '1';
 
-  // Server-Driven State (Single Source of Truth)
   const [selectedSedeId, setSelectedSedeId] = useState(initialSedeId);
-  const [currentSede, setCurrentSede] = useState(null);
-  const [availableSedes, setAvailableSedes] = useState([]);
+  const queryClient = useQueryClient();
+
+  // 1. TanStack Query: High-Performance In-Memory Cache (0ms Sede Switching)
+  const {
+    data: responseData,
+    isLoading: loading,
+    isFetching,
+    refetch: refetchMedia,
+  } = useQuery({
+    queryKey: ['admin-media', selectedSedeId],
+    queryFn: async () => {
+      const res = await mediaService.getBySede(selectedSedeId);
+      return res.data;
+    },
+    staleTime: 5 * 60 * 1000,
+  });
+
+  const currentSede = responseData?.current_sede || null;
+  const availableSedes = responseData?.available_sedes || [];
+  const serverItems = responseData?.data || [];
+
+  // Local media items state for immediate drag/reorder/deletion responsiveness
   const [mediaItems, setMediaItems] = useState([]);
-  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    if (serverItems) {
+      setMediaItems(serverItems);
+    }
+  }, [serverItems]);
 
   // Upload & Form State
   const [uploading, setUploading] = useState(false);
   const [uploadProgress, setUploadProgress] = useState(0);
+  const [compressing, setCompressing] = useState(false);
   const [defaultDuration, setDefaultDuration] = useState(10);
   const [fitMode, setFitMode] = useState('contain');
   const [dragOver, setDragOver] = useState(false);
   const fileInputRef = useRef(null);
+
+  // Maintenance state
+  const [isOptimizing, setIsOptimizing] = useState(false);
 
   // Modals & Selection
   const [selectedIds, setSelectedIds] = useState([]);
@@ -60,63 +90,60 @@ const AdminMedia = () => {
 
   const showMessage = useCallback((text, type = 'success') => {
     setMessage({ text, type });
-    setTimeout(() => setMessage({ text: '', type: '' }), 4000);
+    setTimeout(() => setMessage({ text: '', type: '' }), 5000);
   }, []);
 
-  // Fetch full server-driven context (items, current sede, available sedes) in 1 single call
-  const loadContext = useCallback(async (sedeId, showSpinner = true) => {
-    if (showSpinner) setLoading(true);
-    try {
-      // Default to empty or first sede ID if not provided
-      const res = await mediaService.getBySede(sedeId || 1);
-      if (res.data?.success) {
-        setMediaItems(res.data.data || []);
-        if (res.data.current_sede) {
-          setCurrentSede(res.data.current_sede);
-          setSelectedSedeId(res.data.current_sede.id.toString());
-        }
-        if (res.data.available_sedes) {
-          setAvailableSedes(res.data.available_sedes);
-        }
-        setSelectedIds([]);
-      }
-    } catch (err) {
-      console.error('Error al cargar multimedia:', err);
-      showMessage('Error al obtener la información desde el servidor', 'error');
-    } finally {
-      setLoading(false);
-    }
-  }, [showMessage]);
-
-  // Initial load
-  useEffect(() => {
-    loadContext(selectedSedeId, true);
-  }, [selectedSedeId, loadContext]);
-
-  // Tab switch
+  // Tab switch (Instant from React Query Cache)
   const handleSelectSede = (sedeId) => {
     const idStr = sedeId.toString();
     setSelectedSedeId(idStr);
+    setSelectedIds([]);
     setSearchParams({ sede_id: idStr });
   };
 
-  // Upload files
+  // Upload files with client-side image compression
   const handleFilesSelected = async (files) => {
     if (!files || files.length === 0 || !selectedSedeId) return;
 
     setUploading(true);
     setUploadProgress(0);
 
-    const formData = new FormData();
-    formData.append('sede_id', selectedSedeId);
-    formData.append('duration', defaultDuration.toString());
-    formData.append('fit_mode', fitMode);
-
-    for (let i = 0; i < files.length; i++) {
-      formData.append('files[]', files[i]);
-    }
-
     try {
+      const processedFiles = [];
+
+      for (let i = 0; i < files.length; i++) {
+        const file = files[i];
+        if (file.type.startsWith('image/')) {
+          setCompressing(true);
+          try {
+            // Downscale to Full HD and compress before upload via WebWorker
+            const compressed = await imageCompression(file, {
+              maxSizeMB: 1.2,
+              maxWidthOrHeight: 1920,
+              useWebWorker: true,
+              fileType: file.type === 'image/png' ? 'image/png' : 'image/jpeg',
+            });
+            const processedFile = new File([compressed], file.name, { type: compressed.type });
+            processedFiles.push(processedFile);
+          } catch {
+            processedFiles.push(file);
+          } finally {
+            setCompressing(false);
+          }
+        } else {
+          processedFiles.push(file);
+        }
+      }
+
+      const formData = new FormData();
+      formData.append('sede_id', selectedSedeId);
+      formData.append('duration', defaultDuration.toString());
+      formData.append('fit_mode', fitMode);
+
+      for (let i = 0; i < processedFiles.length; i++) {
+        formData.append('files[]', processedFiles[i]);
+      }
+
       const res = await mediaService.upload(selectedSedeId, formData, (progressEvent) => {
         if (progressEvent.lengthComputable && progressEvent.total > 0) {
           const percent = Math.round((progressEvent.loaded * 100) / progressEvent.total);
@@ -126,7 +153,8 @@ const AdminMedia = () => {
 
       if (res.data?.success) {
         showMessage(res.data.message || 'Archivos subidos exitosamente', 'success');
-        loadContext(selectedSedeId, false);
+        queryClient.invalidateQueries({ queryKey: ['admin-media'] });
+        window.dispatchEvent(new CustomEvent('visorDataUpdated'));
       }
     } catch (err) {
       console.error('Error al subir archivos:', err);
@@ -134,6 +162,7 @@ const AdminMedia = () => {
       showMessage(errMsg, 'error');
     } finally {
       setUploading(false);
+      setCompressing(false);
       setUploadProgress(0);
       if (fileInputRef.current) fileInputRef.current.value = '';
     }
@@ -169,7 +198,8 @@ const AdminMedia = () => {
           duration: 10,
           fit_mode: 'contain',
         });
-        loadContext(selectedSedeId, false);
+        queryClient.invalidateQueries({ queryKey: ['admin-media'] });
+        window.dispatchEvent(new CustomEvent('visorDataUpdated'));
       }
     } catch (err) {
       console.error('Error al agregar URL:', err);
@@ -184,7 +214,7 @@ const AdminMedia = () => {
 
     setMediaItems((prev) =>
       prev.map((m) =>
-        m.id === item.id
+        Number(m.id) === Number(item.id)
           ? { ...m, is_active: newActive, status_label: newActive ? 'Activo' : 'Oculto' }
           : m
       )
@@ -192,11 +222,13 @@ const AdminMedia = () => {
 
     try {
       await mediaService.update(item.id, { is_active: newActive ? 1 : 0 });
+      queryClient.invalidateQueries({ queryKey: ['admin-media'] });
+      window.dispatchEvent(new CustomEvent('visorDataUpdated'));
     } catch (err) {
       console.error('Error al cambiar estado:', err);
       setMediaItems((prev) =>
         prev.map((m) =>
-          m.id === item.id
+          Number(m.id) === Number(item.id)
             ? { ...m, is_active: oldActive, status_label: oldActive ? 'Activo' : 'Oculto' }
             : m
         )
@@ -221,7 +253,8 @@ const AdminMedia = () => {
       if (res.data?.success) {
         showMessage('Contenido actualizado correctamente', 'success');
         setEditItem(null);
-        loadContext(selectedSedeId, false);
+        queryClient.invalidateQueries({ queryKey: ['admin-media'] });
+        window.dispatchEvent(new CustomEvent('visorDataUpdated'));
       }
     } catch (err) {
       console.error('Error al actualizar:', err);
@@ -248,59 +281,97 @@ const AdminMedia = () => {
 
     try {
       await mediaService.reorder(orders);
+      queryClient.invalidateQueries({ queryKey: ['admin-media'] });
+      window.dispatchEvent(new CustomEvent('visorDataUpdated'));
     } catch (err) {
       console.error('Error al guardar orden:', err);
-      loadContext(selectedSedeId, false);
+      refetchMedia();
       showMessage('Error al sincronizar el nuevo orden con el servidor', 'error');
     }
   };
 
-  // Single Delete
+  // Robust Single Delete (Firewall-safe POST fallback)
   const handleDeleteSingle = async () => {
     if (!deleteItem || isDeleting) return;
     setIsDeleting(true);
-    const targetId = deleteItem.id;
+    const targetId = Number(deleteItem.id);
 
     try {
       const res = await mediaService.delete(targetId);
       if (res.data?.success || res.status === 200) {
-        setMediaItems((prev) => prev.filter((m) => m.id !== targetId));
-        setSelectedIds((prev) => prev.filter((id) => id !== targetId));
+        setMediaItems((prev) => prev.filter((m) => Number(m.id) !== targetId));
+        setSelectedIds((prev) => prev.filter((id) => Number(id) !== targetId));
         setDeleteItem(null);
         showMessage('Archivo eliminado exitosamente', 'success');
         window.dispatchEvent(new CustomEvent('visorDataUpdated'));
-        loadContext(selectedSedeId, false);
+        queryClient.invalidateQueries({ queryKey: ['admin-media'] });
+      } else {
+        const errorText = res.data?.error || res.data?.message || 'No se pudo eliminar el archivo';
+        showMessage(errorText, 'error');
       }
     } catch (err) {
       console.error('Error al eliminar:', err);
-      showMessage('Error al eliminar el archivo', 'error');
+      const errMsg =
+        err.response?.data?.error ||
+        err.response?.data?.message ||
+        err.message ||
+        'Error al eliminar el archivo en el servidor';
+      showMessage(errMsg, 'error');
     } finally {
       setIsDeleting(false);
     }
   };
 
-  // Bulk Delete
+  // Robust Bulk Delete
   const handleBulkDelete = async () => {
     if (selectedIds.length === 0 || isDeleting) return;
-    if (!window.confirm(`¿Eliminar los ${selectedIds.length} archivos seleccionados?`)) return;
+    if (!window.confirm(`¿Confirma que desea eliminar permanentemente los ${selectedIds.length} contenidos seleccionados?`)) return;
 
     setIsDeleting(true);
-    const ids = [...selectedIds];
+    const ids = selectedIds.map(Number);
 
     try {
       const res = await mediaService.bulkDelete(ids);
       if (res.data?.success || res.status === 200) {
-        setMediaItems((prev) => prev.filter((m) => !ids.includes(m.id)));
+        setMediaItems((prev) => prev.filter((m) => !ids.includes(Number(m.id))));
         setSelectedIds([]);
-        showMessage(`${ids.length} archivos eliminados`, 'success');
+        showMessage(`${ids.length} archivos eliminados exitosamente`, 'success');
         window.dispatchEvent(new CustomEvent('visorDataUpdated'));
-        loadContext(selectedSedeId, false);
+        queryClient.invalidateQueries({ queryKey: ['admin-media'] });
+      } else {
+        const errorText = res.data?.error || res.data?.message || 'Error al eliminar los archivos';
+        showMessage(errorText, 'error');
       }
     } catch (err) {
       console.error('Error al eliminar en lote:', err);
-      showMessage('Error al eliminar los archivos seleccionados', 'error');
+      const errMsg =
+        err.response?.data?.error ||
+        err.response?.data?.message ||
+        err.message ||
+        'Error al procesar la eliminación múltiple';
+      showMessage(errMsg, 'error');
     } finally {
       setIsDeleting(false);
+    }
+  };
+
+  // Batch Image Optimization Trigger
+  const handleOptimizeImages = async () => {
+    if (isOptimizing) return;
+    setIsOptimizing(true);
+    try {
+      const res = await mediaService.optimizeImages();
+      if (res.data?.success) {
+        showMessage(res.data.message || 'Optimización completada exitosamente', 'success');
+        queryClient.invalidateQueries({ queryKey: ['admin-media'] });
+      } else {
+        showMessage(res.data?.error || 'Error al optimizar imágenes', 'error');
+      }
+    } catch (err) {
+      console.error('Error al optimizar imágenes:', err);
+      showMessage('No se pudo ejecutar la optimización de imágenes', 'error');
+    } finally {
+      setIsOptimizing(false);
     }
   };
 
@@ -347,7 +418,7 @@ const AdminMedia = () => {
         )}
       </div>
 
-      {/* 2. Sede Tabs (Delivered Ready by Backend) */}
+      {/* 2. Sede Tabs (Delivered Ready by Backend with 0ms Cache Switching) */}
       <div className="flex items-center gap-2 overflow-x-auto pb-2 custom-scrollbar">
         {availableSedes.map((sede) => {
           const isSelected = sede.id.toString() === selectedSedeId.toString();
@@ -392,7 +463,7 @@ const AdminMedia = () => {
         </div>
       )}
 
-      {/* 4. Upload Area (Zero-Lag, No Heavy Background Blur) */}
+      {/* 4. Upload Area with Client-Side Compression */}
       <div className="bg-white border border-slate-200 rounded-2xl p-6 shadow-sm space-y-4">
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
           <div>
@@ -404,7 +475,7 @@ const AdminMedia = () => {
               </span>
             </h2>
             <p className="text-xs text-slate-500 mt-0.5">
-              Formatos recomendados: Videos MP4 (H.264) e Imágenes JPG/PNG. Sin corte de tiempo en videos.
+              Formatos: Videos MP4 (H.264) e Imágenes JPG/PNG. Compresión automática WebWorker en cliente.
             </p>
           </div>
 
@@ -478,16 +549,17 @@ const AdminMedia = () => {
             Arrastre sus videos o imágenes aquí, o haga clic para examinar
           </p>
           <p className="text-xs text-slate-400">
-            Archivos optimizados automáticamente con FastStart y miniaturas para Smart TVs
+            Imágenes de más de 10 MB son comprimidas automáticamente en Full HD antes de subir
           </p>
         </div>
 
-        {/* Upload Progress */}
+        {/* Upload & Compression Progress */}
         {uploading && (
           <div className="space-y-2 p-3.5 bg-blue-50 rounded-xl border border-blue-100">
             <div className="flex justify-between text-xs font-semibold">
               <span className="text-[#0049EA] flex items-center gap-1.5">
-                <RefreshCw className="w-3.5 h-3.5 animate-spin" /> Subiendo archivos multimedia al servidor...
+                <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                {compressing ? 'Comprimiendo y optimizando imágenes en navegador...' : 'Subiendo archivos multimedia al servidor...'}
               </span>
               <span className="text-slate-800 font-bold">{uploadProgress}%</span>
             </div>
@@ -501,7 +573,7 @@ const AdminMedia = () => {
         )}
       </div>
 
-      {/* 5. Media Playlist Table (Pure Presentation Driven by API Data) */}
+      {/* 5. Media Playlist Table */}
       <div className="bg-white border border-slate-200 rounded-2xl shadow-sm overflow-hidden">
         {/* Table Header Controls */}
         <div className="p-4 border-b border-slate-100 flex flex-col sm:flex-row sm:items-center justify-between gap-3 bg-slate-50/70">
@@ -512,7 +584,8 @@ const AdminMedia = () => {
             {selectedIds.length > 0 && (
               <button
                 onClick={handleBulkDelete}
-                className="px-3 py-1 bg-rose-600 hover:bg-rose-700 text-white rounded-lg text-xs font-semibold flex items-center gap-1 cursor-pointer transition-colors shadow-xs"
+                disabled={isDeleting}
+                className="px-3 py-1 bg-rose-600 hover:bg-rose-700 text-white rounded-lg text-xs font-semibold flex items-center gap-1 cursor-pointer transition-colors shadow-xs disabled:opacity-50"
               >
                 <Trash2 className="w-3.5 h-3.5" />
                 <span>Eliminar {selectedIds.length} seleccionados</span>
@@ -522,6 +595,16 @@ const AdminMedia = () => {
 
           <div className="flex items-center gap-2">
             <button
+              onClick={handleOptimizeImages}
+              disabled={isOptimizing}
+              className="flex items-center gap-1.5 px-3 py-1.5 bg-indigo-50 hover:bg-indigo-100 text-indigo-700 border border-indigo-200 rounded-lg text-xs font-semibold cursor-pointer transition-colors disabled:opacity-50"
+              title="Comprimir imágenes pesadas y generar miniaturas ligeras en el servidor"
+            >
+              <Sparkles className={`w-3.5 h-3.5 ${isOptimizing ? 'animate-spin text-indigo-600' : ''}`} />
+              <span>{isOptimizing ? 'Optimizando...' : 'Comprimir Imágenes'}</span>
+            </button>
+
+            <button
               onClick={toggleSelectAll}
               className="px-3 py-1.5 bg-white border border-slate-200 hover:bg-slate-100 text-slate-700 text-xs font-semibold rounded-lg cursor-pointer transition-colors"
             >
@@ -529,12 +612,13 @@ const AdminMedia = () => {
                 ? 'Deseleccionar todo'
                 : 'Seleccionar todo'}
             </button>
+
             <button
-              onClick={() => loadContext(selectedSedeId, true)}
+              onClick={() => refetchMedia()}
               className="p-1.5 text-slate-400 hover:text-slate-700 rounded-lg hover:bg-slate-100 cursor-pointer transition-colors"
               title="Recargar desde servidor"
             >
-              <RefreshCw className={`w-4 h-4 ${loading ? 'animate-spin text-[#0049EA]' : ''}`} />
+              <RefreshCw className={`w-4 h-4 ${isFetching ? 'animate-spin text-[#0049EA]' : ''}`} />
             </button>
           </div>
         </div>
@@ -578,7 +662,7 @@ const AdminMedia = () => {
                   </button>
                 </div>
 
-                {/* Zero-Lag Thumbnail Card (Never Streams Video in Table) */}
+                {/* Lightweight Thumbnail Box (Ultra-Fast Decoding & Error Fallback) */}
                 <div
                   onClick={() => setPreviewItem(item)}
                   className="relative w-20 h-14 bg-slate-900 rounded-xl overflow-hidden border border-slate-200 shrink-0 cursor-pointer group flex items-center justify-center shadow-xs"
@@ -591,18 +675,25 @@ const AdminMedia = () => {
                       loading="lazy"
                       decoding="async"
                       className="w-full h-full object-cover"
+                      onError={(e) => {
+                        e.currentTarget.style.display = 'none';
+                        if (e.currentTarget.nextSibling) {
+                          e.currentTarget.nextSibling.style.display = 'flex';
+                        }
+                      }}
                     />
-                  ) : (
-                    <div className="w-full h-full flex flex-col items-center justify-center bg-gradient-to-br from-slate-900 to-indigo-950 text-indigo-300">
-                      <Film className="w-5 h-5 opacity-80" />
-                    </div>
-                  )}
+                  ) : null}
+
+                  <div className={`${item.thumbnail_url ? 'hidden' : 'flex'} w-full h-full items-center justify-center bg-gradient-to-br from-slate-900 to-indigo-950 text-indigo-300`}>
+                    {item.type === 'video' ? <Film className="w-5 h-5 opacity-80" /> : <ImageIcon className="w-5 h-5 opacity-80" />}
+                  </div>
+
                   <div className="absolute inset-0 bg-black/25 flex items-center justify-center group-hover:bg-[#0049EA]/40 transition-colors">
                     <Play className="w-4 h-4 text-white fill-current" />
                   </div>
                 </div>
 
-                {/* Details (Delivered Pre-Formatted by Backend) */}
+                {/* Details */}
                 <div className="min-w-0">
                   <div className="flex items-center gap-2">
                     <h3 className="text-sm font-bold text-slate-900 truncate max-w-xs md:max-w-md">
@@ -933,7 +1024,7 @@ const AdminMedia = () => {
               type="button"
               disabled={isDeleting}
               onClick={handleDeleteSingle}
-              className="px-4 py-2 bg-rose-600 hover:bg-rose-700 text-white rounded-xl text-xs font-semibold cursor-pointer shadow-sm"
+              className="px-4 py-2 bg-rose-600 hover:bg-rose-700 text-white rounded-xl text-xs font-semibold cursor-pointer shadow-sm disabled:opacity-50"
             >
               {isDeleting ? 'Eliminando...' : 'Sí, Eliminar'}
             </button>
