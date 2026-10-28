@@ -78,7 +78,7 @@ const AdminMedia = () => {
     }
   }, [showMessage]);
 
-  // 1. Fetch Sedes on Mount
+  // 1. Fetch Sedes on Mount (only runs once on mount)
   useEffect(() => {
     let isMounted = true;
     const fetchSedes = async () => {
@@ -101,32 +101,14 @@ const AdminMedia = () => {
     return () => {
       isMounted = false;
     };
-  }, [selectedSedeId, showMessage]);
+  }, []);
 
   // 2. Fetch Media when selected Sede changes
   useEffect(() => {
-    if (!selectedSedeId) return;
-    let isMounted = true;
-    mediaService.getBySede(selectedSedeId).then((res) => {
-      if (res.data.success && isMounted) {
-        setMediaItems(res.data.data);
-        setSelectedIds([]);
-      }
-    }).catch((err) => {
-      console.error('Error fetching media:', err);
-      if (isMounted) {
-        showMessage('Error al cargar la lista de contenidos multimedia', 'error');
-      }
-    }).finally(() => {
-      if (isMounted) {
-        setLoadingMedia(false);
-      }
-    });
-
-    return () => {
-      isMounted = false;
-    };
-  }, [selectedSedeId, showMessage]);
+    if (selectedSedeId) {
+      loadMediaForSede(selectedSedeId, true);
+    }
+  }, [selectedSedeId, loadMediaForSede]);
 
   // 3. File Upload Handling (No time validation for videos; duration applies exclusively to photos)
   const handleFilesSelected = async (files) => {
@@ -231,16 +213,23 @@ const AdminMedia = () => {
     }
   };
 
-  // 5. Toggle item active
+  // 5. Toggle item active (Optimistic 0ms update)
   const handleToggleActive = async (item) => {
+    const oldActive = item.is_active;
+    const newActive = oldActive ? 0 : 1;
+    // Optimistic UI update
+    setMediaItems((prev) =>
+      prev.map((m) => (m.id === item.id ? { ...m, is_active: newActive } : m))
+    );
+
     try {
-      const newActive = item.is_active ? 0 : 1;
       await mediaService.update(item.id, { is_active: newActive });
-      setMediaItems(
-        mediaItems.map((m) => (m.id === item.id ? { ...m, is_active: newActive } : m))
-      );
     } catch (err) {
       console.error('Error toggling active state:', err);
+      // Revert if error
+      setMediaItems((prev) =>
+        prev.map((m) => (m.id === item.id ? { ...m, is_active: oldActive } : m))
+      );
       showMessage('Error al cambiar el estado', 'error');
     }
   };
@@ -631,13 +620,26 @@ const AdminMedia = () => {
                 {/* Thumbnail / Media Preview */}
                 <div
                   onClick={() => setPreviewItem(item)}
-                  className="relative w-20 h-14 bg-slate-100 rounded-xl overflow-hidden border border-slate-200 shrink-0 cursor-pointer group flex items-center justify-center shadow-xs"
+                  className="relative w-20 h-14 bg-slate-900 rounded-xl overflow-hidden border border-slate-200 shrink-0 cursor-pointer group flex items-center justify-center shadow-xs"
+                  title="Haga clic para ver vista previa"
                 >
                   {item.type === 'video' ? (
                     <>
-                      <video src={resolveMediaUrl(item.url)} className="w-full h-full object-cover" preload="metadata" />
-                      <div className="absolute inset-0 bg-black/30 flex items-center justify-center group-hover:bg-indigo-600/40 transition-colors">
-                        <Play className="w-5 h-5 text-white fill-current" />
+                      {item.thumbnail_url && !item.thumbnail_url.endsWith('.mp4') && !item.thumbnail_url.endsWith('.webm') && !item.thumbnail_url.endsWith('.mov') ? (
+                        <img
+                          src={resolveMediaUrl(item.thumbnail_url)}
+                          alt={item.title}
+                          loading="lazy"
+                          decoding="async"
+                          className="w-full h-full object-cover"
+                        />
+                      ) : (
+                        <div className="w-full h-full flex flex-col items-center justify-center bg-gradient-to-br from-slate-900 via-indigo-950 to-slate-900 text-indigo-300">
+                          <Film className="w-5 h-5 opacity-80" />
+                        </div>
+                      )}
+                      <div className="absolute inset-0 bg-black/25 flex items-center justify-center group-hover:bg-indigo-600/40 transition-colors">
+                        <Play className="w-4 h-4 text-white fill-current" />
                       </div>
                     </>
                   ) : (
