@@ -28,10 +28,43 @@ const AdminUsers = lazy(() => import('./pages/AdminUsers'));
 const AdminAudit = lazy(() => import('./pages/AdminAudit'));
 const AdminSettings = lazy(() => import('./pages/AdminSettings'));
 
+class GlobalErrorBoundary extends React.Component {
+  constructor(props) {
+    super(props);
+    this.state = { hasError: false };
+  }
+
+  static getDerivedStateFromError() {
+    return { hasError: true };
+  }
+
+  componentDidCatch(error, errorInfo) {
+    console.error('TV Error Boundary caught error:', error, errorInfo);
+    setTimeout(() => {
+      window.location.reload();
+    }, 5000);
+  }
+
+  render() {
+    if (this.state.hasError) {
+      return (
+        <div className="fixed inset-0 w-full h-full bg-black text-white flex flex-col items-center justify-center p-6 text-center z-50">
+          <div className="w-12 h-12 rounded-2xl bg-rose-500/10 border border-rose-500/20 text-rose-500 flex items-center justify-center mb-4 animate-pulse">
+            <span className="text-lg font-black">TV</span>
+          </div>
+          <h2 className="text-base font-bold text-white mb-1">Reconectando Visor TV...</h2>
+          <p className="text-xs text-slate-400">Recuperando transmisión automáticamente...</p>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}
+
 const PageLoader = () => (
-  <div className="h-full min-h-[50vh] w-full flex flex-col items-center justify-center gap-3 p-8">
-    <div className="w-8 h-8 rounded-full border-3 border-blue-100 border-t-[#0049EA] animate-spin" />
-    <span className="text-xs font-semibold text-slate-400">Cargando...</span>
+  <div className="fixed inset-0 w-full h-full bg-black flex flex-col items-center justify-center gap-4 text-white z-50">
+    <div className="w-9 h-9 rounded-full border-3 border-rose-950 border-t-rose-500 animate-spin" />
+    <span className="text-xs font-mono font-semibold tracking-wider text-slate-400">Cargando Visor TV...</span>
   </div>
 );
 
@@ -79,10 +112,11 @@ const SuperadminRoute = ({ children }) => {
 
 function App() {
   return (
-    <QueryClientProvider client={queryClient}>
-      <AuthProvider>
-        <BrowserRouter>
-          <Suspense fallback={<PageLoader />}>
+    <GlobalErrorBoundary>
+      <QueryClientProvider client={queryClient}>
+        <AuthProvider>
+          <BrowserRouter>
+            <Suspense fallback={<PageLoader />}>
             <Routes>
               {/* Public / TV Kiosk Routes */}
               <Route path="/" element={<SedesSelection />} />
@@ -131,7 +165,8 @@ function App() {
         </BrowserRouter>
       </AuthProvider>
     </QueryClientProvider>
-  );
+  </GlobalErrorBoundary>
+);
 }
 
 export default App;

@@ -109,10 +109,35 @@ const AdminMedia = () => {
     setUploadProgress(0);
 
     try {
-      const processedFiles = [];
+      const allowedExts = ['mp4', 'jpg', 'jpeg', 'png'];
+      const validFiles = [];
+      const rejectedFiles = [];
 
       for (let i = 0; i < files.length; i++) {
         const file = files[i];
+        const ext = file.name.split('.').pop()?.toLowerCase();
+        if (!allowedExts.includes(ext)) {
+          rejectedFiles.push(file.name);
+        } else {
+          validFiles.push(file);
+        }
+      }
+
+      if (rejectedFiles.length > 0) {
+        showMessage(
+          `Formato incompatible con Smart TV: ${rejectedFiles.join(', ')}. Los televisores solo soportan videos MP4 (.mp4) e imágenes JPG o PNG.`,
+          'error'
+        );
+        if (validFiles.length === 0) {
+          setUploading(false);
+          return;
+        }
+      }
+
+      const processedFiles = [];
+
+      for (let i = 0; i < validFiles.length; i++) {
+        const file = validFiles[i];
         if (file.type.startsWith('image/')) {
           setCompressing(true);
           try {
@@ -536,7 +561,7 @@ const AdminMedia = () => {
             ref={fileInputRef}
             type="file"
             multiple
-            accept="video/*,image/*"
+            accept=".mp4,.jpg,.jpeg,.png,video/mp4,image/jpeg,image/png"
             onChange={(e) => handleFilesSelected(e.target.files)}
             className="hidden"
           />
@@ -546,11 +571,19 @@ const AdminMedia = () => {
           </div>
 
           <p className="text-sm font-semibold text-slate-800">
-            Arrastre sus videos o imágenes aquí, o haga clic para examinar
+            Arrastre sus videos MP4 o imágenes JPG/PNG aquí, o haga clic para examinar
           </p>
-          <p className="text-xs text-slate-400">
-            Imágenes de más de 10 MB son comprimidas automáticamente en Full HD antes de subir
-          </p>
+          <div className="flex flex-wrap items-center justify-center gap-1.5 mt-1 text-xs">
+            <span className="px-2 py-0.5 rounded-md bg-blue-100 text-[#0049EA] font-bold">
+              Videos: .mp4
+            </span>
+            <span className="px-2 py-0.5 rounded-md bg-emerald-100 text-emerald-800 font-bold">
+              Fotos: .jpg, .png
+            </span>
+            <span className="text-slate-400">
+              • Formatos requeridos para Smart TVs
+            </span>
+          </div>
         </div>
 
         {/* Upload & Compression Progress */}

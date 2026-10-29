@@ -82,6 +82,7 @@ const VisorTV = () => {
   const [error, setError] = useState(null);
   const [isPaused, setIsPaused] = useState(false);
   const [isMuted, setIsMuted] = useState(false);
+  const [isOfflineMode, setIsOfflineMode] = useState(false);
 
   // Persistent Fit Mode: default to 'cover' (Pantalla Completa) across all videos until manually changed
   const [userFitOverride, setUserFitOverride] = useState(() => {
@@ -96,6 +97,7 @@ const VisorTV = () => {
   const [showControls, setShowControls] = useState(true);
   const [versionHash, setVersionHash] = useState('');
   const [showHelpModal, setShowHelpModal] = useState(false);
+  const [videoTransitioning, setVideoTransitioning] = useState(false);
 
   // Direct DOM Refs for Progress Bars (0 React re-renders during video playback)
   const ambientProgressRef = useRef(null);
@@ -109,32 +111,20 @@ const VisorTV = () => {
     if (controlProgressRef.current) controlProgressRef.current.style.width = widthStr;
   }, []);
 
-  // Double Buffering (Slot A & Slot B) State
-  const [activeSlot, setActiveSlot] = useState('A');
-  const [slotAIndex, setSlotAIndex] = useState(0);
-  const [slotBIndex, setSlotBIndex] = useState(1);
-
-  // Refs
-  const videoARef = useRef(null);
-  const videoBRef = useRef(null);
+  // Refs for Media Management
+  const videoRef = useRef(null);
   const playPromiseRef = useRef(null);
-  const imageTimerRef = useRef(null);
   const progressTimerRef = useRef(null);
   const controlsTimeoutRef = useRef(null);
   const containerRef = useRef(null);
   const latestPlaylistRef = useRef([]);
   const versionHashRef = useRef('');
   const currentIndexRef = useRef(0);
-  const activeSlotRef = useRef('A');
+  const retryTimeoutRef = useRef(null);
 
   // Error cooldown and consecutive error tracker to prevent cascading crash
   const consecutiveErrorsRef = useRef(0);
   const errorCooldownRef = useRef(null);
-
-  // Transition & Sychronization Refs (Zero-Black-Screen Engine)
-  const transitionInProgressRef = useRef(false);
-  const transitionTimeoutRef = useRef(null);
-  const pendingTransitionRef = useRef(null);
 
   // Stall Watchdog Refs
   const stallCounterRef = useRef(0);
@@ -148,11 +138,6 @@ const VisorTV = () => {
     currentIndexRef.current = currentIndex;
   }, [currentIndex]);
 
-  useEffect(() => {
-    activeSlotRef.current = activeSlot;
-  }, [activeSlot]);
-
-  // Single elegant aesthetic
   const currentTheme = getThemeById('elegant-red');
 
   // Save fit mode to localStorage and state
@@ -210,7 +195,7 @@ const VisorTV = () => {
     }
   }, []);
 
-  // Listen to Fullscreen changes across all browser implementations
+  // Listen to Fullscreen changes
   useEffect(() => {
     const handleFullscreenChange = () => {
       const fsElement =
@@ -242,17 +227,11 @@ const VisorTV = () => {
       if (promise !== undefined) {
         playPromiseRef.current = promise;
         promise.catch((err) => {
-          if (err.name === 'AbortError') {
-            return;
-          }
+          if (err.name === 'AbortError') return;
           console.warn('Autoplay unmuted was restricted, falling back to muted playback:', err);
           videoEl.muted = true;
           setIsMuted(true);
-          videoEl.play().catch((playErr) => {
-            if (playErr.name !== 'AbortError') {
-              console.error('Video playback failed:', playErr);
-            }
-          });
+          videoEl.play().catch(() => {});
         });
       }
     } catch (_) {}
@@ -279,9 +258,8 @@ const VisorTV = () => {
   useEffect(() => {
     const handleFirstInteraction = () => {
       setIsMuted(false);
-      const activeVideo = activeSlotRef.current === 'A' ? videoARef.current : videoBRef.current;
-      if (activeVideo) {
-        activeVideo.muted = false;
+      if (videoRef.current) {
+        videoRef.current.muted = false;
       }
     };
     window.addEventListener('click', handleFirstInteraction, { once: true });
@@ -294,7 +272,7 @@ const VisorTV = () => {
     };
   }, []);
 
-  // Smart Preload for Images
+  // Preload upcoming images in background
   useEffect(() => {
     if (playlist.length <= 1) return;
     const next1 = playlist[(currentIndex + 1) % playlist.length];
@@ -307,12 +285,12 @@ const VisorTV = () => {
     });
   }, [currentIndex, playlist]);
 
-  // Initial Load & Periodic Sync of Playlist
+  // Load Playlist with LocalStorage Offline Cache Fallback & Auto-Retry
   const loadPlaylist = useCallback(async (isInitial = false) => {
-    if (isInitial) {
+    if (isInitial && playlist.length === 0) {
       setIsLoading(true);
-      setError(null);
     }
+
     try {
       if (!isInitial && versionHashRef.current) {
         try {
@@ -320,13 +298,19 @@ const VisorTV = () => {
           if (versionRes.data.success && versionRes.data.version_hash === versionHashRef.current) {
             return;
           }
-        } catch (checkErr) {
-          console.warn('checkVersion check failed, falling back to full playlist fetch:', checkErr);
-        }
+        } catch (_) {}
       }
 
       const res = await playlistService.getPlaylist(slug);
       if (res.data.success) {
+        setError(null);
+        setIsOfflineMode(false);
+
+        // Cache in localStorage for immediate offline restoration on TV reboot
+        try {
+          localStorage.setItem(`visor_tv_cache_${slug}`, JSON.stringify(res.data));
+        } catch (_) {}
+
         setSede(res.data.sede);
         setSettings({
           tv_show_clock: res.data.settings?.tv_show_clock !== false,
@@ -335,6 +319,7 @@ const VisorTV = () => {
           tv_auto_refresh_seconds: res.data.settings?.tv_auto_refresh_seconds || 30,
           tv_transition_effect: res.data.settings?.tv_transition_effect || 'fade',
         });
+
         const items = res.data.playlist || [];
         const prevItems = latestPlaylistRef.current;
         setPlaylist(items);
@@ -343,56 +328,67 @@ const VisorTV = () => {
         versionHashRef.current = res.data.version_hash;
 
         if (isInitial) {
-          if (items.length > 0) {
-            setSlotAIndex(0);
-            setSlotBIndex(items.length > 1 ? 1 : 0);
-            setActiveSlot('A');
-            activeSlotRef.current = 'A';
-            setCurrentIndex(0);
-            currentIndexRef.current = 0;
-          }
-        } else {
-          if (items.length > 0) {
-            const currentItem = prevItems[currentIndexRef.current];
-            const foundIndex = currentItem ? items.findIndex((it) => it.id === currentItem.id) : -1;
-            if (foundIndex !== -1) {
-              setCurrentIndex(foundIndex);
-              currentIndexRef.current = foundIndex;
-              if (activeSlotRef.current === 'A') {
-                setSlotAIndex(foundIndex);
-                setSlotBIndex((foundIndex + 1) % items.length);
-              } else {
-                setSlotBIndex(foundIndex);
-                setSlotAIndex((foundIndex + 1) % items.length);
-              }
-            } else {
-              const nextSafe = Math.min(currentIndexRef.current, items.length - 1);
-              setCurrentIndex(nextSafe);
-              currentIndexRef.current = nextSafe;
-              setSlotAIndex(nextSafe);
-              setSlotBIndex((nextSafe + 1) % items.length);
-              setActiveSlot('A');
-              activeSlotRef.current = 'A';
-            }
+          setCurrentIndex(0);
+          currentIndexRef.current = 0;
+        } else if (items.length > 0) {
+          const currentItem = prevItems[currentIndexRef.current];
+          const foundIndex = currentItem ? items.findIndex((it) => it.id === currentItem.id) : -1;
+          if (foundIndex !== -1) {
+            setCurrentIndex(foundIndex);
+            currentIndexRef.current = foundIndex;
+          } else {
+            const nextSafe = Math.min(currentIndexRef.current, items.length - 1);
+            setCurrentIndex(nextSafe);
+            currentIndexRef.current = nextSafe;
           }
         }
       }
     } catch (err) {
-      console.error('Error fetching playlist:', err);
-      if (isInitial) {
-        setError(
-          err.response?.data?.error || 'No se pudo cargar la programación de esta sede.'
-        );
+      console.warn('Network issue fetching playlist:', err);
+
+      // Attempt recovery from offline cache
+      let recovered = false;
+      try {
+        const cachedRaw = localStorage.getItem(`visor_tv_cache_${slug}`);
+        if (cachedRaw) {
+          const cachedData = JSON.parse(cachedRaw);
+          if (cachedData && cachedData.sede && Array.isArray(cachedData.playlist)) {
+            setSede(cachedData.sede);
+            setPlaylist(cachedData.playlist);
+            latestPlaylistRef.current = cachedData.playlist;
+            setSettings({
+              tv_show_clock: cachedData.settings?.tv_show_clock !== false,
+              tv_show_sede_title: cachedData.settings?.tv_show_sede_title !== false,
+              tv_show_progress_bar: cachedData.settings?.tv_show_progress_bar !== false,
+              tv_auto_refresh_seconds: cachedData.settings?.tv_auto_refresh_seconds || 30,
+            });
+            setError(null);
+            setIsOfflineMode(true);
+            recovered = true;
+          }
+        }
+      } catch (_) {}
+
+      if (!recovered && isInitial && playlist.length === 0) {
+        setError(err.response?.data?.error || 'No se pudo conectar con el servidor.');
+        // Auto-retry connection every 5s on Smart TVs without requiring user interaction
+        if (retryTimeoutRef.current) clearTimeout(retryTimeoutRef.current);
+        retryTimeoutRef.current = setTimeout(() => {
+          loadPlaylist(true);
+        }, 5000);
       }
     } finally {
       if (isInitial) {
         setIsLoading(false);
       }
     }
-  }, [slug]);
+  }, [slug, playlist.length]);
 
   useEffect(() => {
     loadPlaylist(true);
+    return () => {
+      if (retryTimeoutRef.current) clearTimeout(retryTimeoutRef.current);
+    };
   }, [loadPlaylist]);
 
   // Periodic Polling
@@ -404,7 +400,7 @@ const VisorTV = () => {
     return () => clearInterval(interval);
   }, [settings.tv_auto_refresh_seconds, loadPlaylist]);
 
-  // Controls Visibility Timeout with Activity Throttling (saves TV CPU)
+  // Controls Visibility Timeout with Activity Throttling
   const handleUserActivity = useCallback(() => {
     const now = Date.now();
     if (now - lastActivityRef.current < 250) return;
@@ -427,213 +423,144 @@ const VisorTV = () => {
     return () => {
       window.removeEventListener('mousemove', handleMouseMove);
       window.removeEventListener('keydown', handleKeyDown);
-      if (controlsTimeoutRef.current) {
-        clearTimeout(controlsTimeoutRef.current);
-      }
+      if (controlsTimeoutRef.current) clearTimeout(controlsTimeoutRef.current);
     };
   }, [handleUserActivity]);
 
-  // Double Buffering Transition (Seamless Zero-Black-Screen A/B Switch)
-  const advanceToSlot = useCallback(
-    (targetIndex, forceImmediate = false) => {
+  // Transition to specific item
+  const transitionTo = useCallback(
+    (targetIndex) => {
       const items = latestPlaylistRef.current;
       if (!items || items.length === 0) return;
 
       if (items.length === 1) {
-        // Single item loop: do not toggle slots, restart cleanly in place
         setCurrentIndex(0);
         currentIndexRef.current = 0;
         updateProgressDom(0);
-        const activeVid = activeSlotRef.current === 'A' ? videoARef.current : videoBRef.current;
-        if (activeVid) {
+        if (videoRef.current) {
           try {
-            activeVid.currentTime = 0;
-            playSafe(activeVid);
+            videoRef.current.currentTime = 0;
+            playSafe(videoRef.current);
           } catch (_) {}
         }
         return;
       }
 
-      if (transitionInProgressRef.current) {
-        if (!forceImmediate) {
-          return;
-        }
-        if (transitionTimeoutRef.current) {
-          clearTimeout(transitionTimeoutRef.current);
-          transitionTimeoutRef.current = null;
-        }
-      }
-
       const validIndex = ((targetIndex % items.length) + items.length) % items.length;
-      const currentSlot = activeSlotRef.current;
-      const nextSlot = currentSlot === 'A' ? 'B' : 'A';
-      const nextItem = items[validIndex];
-      if (!nextItem) return;
+      setVideoTransitioning(true);
+      setCurrentIndex(validIndex);
+      currentIndexRef.current = validIndex;
+      updateProgressDom(0);
 
-      transitionInProgressRef.current = true;
-
-      // Stage the target index in the target slot
-      if (nextSlot === 'B') {
-        setSlotBIndex(validIndex);
-      } else {
-        setSlotAIndex(validIndex);
-      }
-
-      let transitionCompleted = false;
-
-      // Helper to finalize the visual cross-fade and queue the following item
-      const completeTransition = () => {
-        if (transitionCompleted) return;
-        transitionCompleted = true;
-
-        if (transitionTimeoutRef.current) {
-          clearTimeout(transitionTimeoutRef.current);
-          transitionTimeoutRef.current = null;
-        }
-        pendingTransitionRef.current = null;
-
-        const incomingVideo = nextSlot === 'B' ? videoBRef.current : videoARef.current;
-        const outgoingVideo = currentSlot === 'A' ? videoARef.current : videoBRef.current;
-
-        // Unmute incoming if sound is active
-        if (incomingVideo) {
-          incomingVideo.muted = isMuted;
-        }
-
-        // Switch visible active slot: incoming slot fades in (0 -> 100), outgoing slot fades out (100 -> 0)
-        // Outgoing media holds its last frame cleanly on display during the entire 500ms crossfade!
-        setActiveSlot(nextSlot);
-        activeSlotRef.current = nextSlot;
-        setCurrentIndex(validIndex);
-        currentIndexRef.current = validIndex;
-        updateProgressDom(0);
-
-        // After cross-fade duration (550ms):
-        // 1. Soft-pause outgoing video without resetting its frame
-        // 2. Stage the next subsequent item (validIndex + 1) in the newly invisible slot
-        setTimeout(() => {
-          if (outgoingVideo) {
-            pauseSafe(outgoingVideo);
-            try {
-              outgoingVideo.muted = true;
-            } catch (_) {}
-          }
-
-          const subsequentIndex = (validIndex + 1) % items.length;
-          if (currentSlot === 'A') {
-            setSlotAIndex(subsequentIndex);
-          } else {
-            setSlotBIndex(subsequentIndex);
-          }
-
-          transitionInProgressRef.current = false;
-        }, 550);
-      };
-
-      pendingTransitionRef.current = { slot: nextSlot, complete: completeTransition };
-
-      const isNextEmbed = nextItem.type === 'video' && !!getEmbedUrl(nextItem.url);
-
-      if (nextItem.type === 'video' && !isNextEmbed) {
-        // Target is a video: start it in background and wait for 'playing' or buffer
-        const targetVideo = nextSlot === 'B' ? videoBRef.current : videoARef.current;
-
-        // Safety fallback timer: if heavy video buffers > 7s or decoder lags, proceed anyway
-        transitionTimeoutRef.current = setTimeout(() => {
-          console.warn('Transition timeout: proceeding to crossfade after buffer delay');
-          completeTransition();
-        }, 7000);
-
-        if (targetVideo) {
-          try {
-            targetVideo.muted = true;
-            const playPromise = targetVideo.play();
-            if (playPromise !== undefined) {
-              playPromise
-                .then(() => {
-                  completeTransition();
-                })
-                .catch(() => {
-                  targetVideo.muted = true;
-                  targetVideo
-                    .play()
-                    .then(() => completeTransition())
-                    .catch(() => completeTransition());
-                });
-            } else {
-              completeTransition();
-            }
-          } catch (_) {
-            completeTransition();
-          }
-        } else {
-          setTimeout(completeTransition, 50);
-        }
-      } else {
-        // Target is an image or external embed: crossfade immediately with preloaded asset
-        completeTransition();
-      }
+      setTimeout(() => {
+        setVideoTransitioning(false);
+      }, 350);
     },
-    [pauseSafe, playSafe, isMuted]
+    [playSafe, updateProgressDom]
   );
 
-  const goToNext = useCallback(
-    (force = true) => {
-      advanceToSlot(currentIndexRef.current + 1, force);
-    },
-    [advanceToSlot]
-  );
+  const goToNext = useCallback(() => {
+    transitionTo(currentIndexRef.current + 1);
+  }, [transitionTo]);
 
-  const goToPrev = useCallback(
-    (force = true) => {
-      advanceToSlot(currentIndexRef.current - 1, force);
-    },
-    [advanceToSlot]
-  );
+  const goToPrev = useCallback(() => {
+    transitionTo(currentIndexRef.current - 1);
+  }, [transitionTo]);
 
-  // Pre-queue the subsequent item in the inactive slot after transition completes
+  // Keyboard and Remote Control Event Handler
   useEffect(() => {
-    if (playlist.length <= 1) return;
-    const timer = setTimeout(() => {
-      const nextIdx = (currentIndex + 1) % playlist.length;
-      if (activeSlot === 'A') {
-        setSlotBIndex(nextIdx);
-      } else {
-        setSlotAIndex(nextIdx);
+    const handleRemoteKeys = (e) => {
+      const activeTag = document.activeElement ? document.activeElement.tagName.toLowerCase() : '';
+      if (activeTag === 'input' || activeTag === 'textarea') return;
+
+      handleUserActivity();
+
+      switch (e.key) {
+        case ' ':
+        case 'MediaPlayPause':
+        case 'Play':
+        case 'Pause':
+          e.preventDefault();
+          setIsPaused((prev) => !prev);
+          break;
+        case 'ArrowRight':
+        case 'MediaTrackNext':
+        case 'ChannelUp':
+        case 'FastForward':
+          e.preventDefault();
+          goToNext();
+          break;
+        case 'ArrowLeft':
+        case 'MediaTrackPrevious':
+        case 'ChannelDown':
+        case 'Rewind':
+          e.preventDefault();
+          goToPrev();
+          break;
+        case 'm':
+        case 'M':
+        case 'VolumeMute':
+          e.preventDefault();
+          setIsMuted((prev) => {
+            const next = !prev;
+            if (videoRef.current) videoRef.current.muted = next;
+            return next;
+          });
+          break;
+        case 'f':
+        case 'F':
+          e.preventDefault();
+          toggleFullscreen();
+          break;
+        case 'a':
+        case 'A':
+          e.preventDefault();
+          toggleFitMode();
+          break;
+        case '?':
+        case 'h':
+        case 'H':
+          e.preventDefault();
+          setShowHelpModal((prev) => !prev);
+          break;
+        case 'Escape':
+          if (showHelpModal) {
+            e.preventDefault();
+            setShowHelpModal(false);
+          }
+          break;
+        default:
+          break;
       }
-    }, 600);
-    return () => clearTimeout(timer);
-  }, [currentIndex, activeSlot, playlist.length]);
+    };
+
+    window.addEventListener('keydown', handleRemoteKeys);
+    return () => window.removeEventListener('keydown', handleRemoteKeys);
+  }, [goToNext, goToPrev, toggleFullscreen, toggleFitMode, handleUserActivity, showHelpModal]);
 
   const currentItem = playlist[currentIndex] || null;
   const isEmbedVideo = currentItem?.type === 'video' && !!getEmbedUrl(currentItem?.url);
 
-  // Active Video Playback Controller
+  // Active Video Playback Controller (Single-Decoder Smart TV Engine)
   useEffect(() => {
-    const activeVideo = activeSlot === 'A' ? videoARef.current : videoBRef.current;
-    const inactiveVideo = activeSlot === 'A' ? videoBRef.current : videoARef.current;
+    const video = videoRef.current;
+    if (!video) return;
 
-    if (inactiveVideo && !transitionInProgressRef.current) {
-      pauseSafe(inactiveVideo);
-      try {
-        inactiveVideo.muted = true;
-      } catch (_) {}
-    }
-
-    if (!currentItem || currentItem.type !== 'video' || isEmbedVideo) return;
-    if (!activeVideo) return;
-
-    if (isPaused) {
-      pauseSafe(activeVideo);
+    if (!currentItem || currentItem.type !== 'video' || isEmbedVideo) {
+      pauseSafe(video);
       return;
     }
 
-    playSafe(activeVideo);
-  }, [currentIndex, activeSlot, isPaused, isMuted, currentItem, isEmbedVideo, playSafe, pauseSafe]);
+    if (isPaused) {
+      pauseSafe(video);
+      return;
+    }
 
-  // Auto-advance for Images and External Embed Videos
+    playSafe(video);
+  }, [currentIndex, isPaused, isMuted, currentItem, isEmbedVideo, playSafe, pauseSafe]);
+
+  // Auto-advance for Images and External Embeds
   useEffect(() => {
-    if (imageTimerRef.current) clearInterval(imageTimerRef.current);
     if (progressTimerRef.current) clearInterval(progressTimerRef.current);
 
     if (!currentItem || isPaused || playlist.length <= 1) {
@@ -658,15 +585,13 @@ const VisorTV = () => {
       }, intervalMs);
     }
 
-    const imgTimer = imageTimerRef.current;
     const progTimer = progressTimerRef.current;
     return () => {
-      if (imgTimer) clearInterval(imgTimer);
       if (progTimer) clearInterval(progTimer);
     };
   }, [currentItem, isPaused, playlist.length, goToNext, isEmbedVideo, updateProgressDom]);
 
-  // Video Time Update & Ended Handlers (0 React re-renders via direct DOM updates)
+  // Video Progress Update & Ended Handlers
   const handleVideoTimeUpdate = (e) => {
     const video = e.target;
     if (video && video.duration > 0) {
@@ -677,12 +602,10 @@ const VisorTV = () => {
 
   const handleVideoEnded = () => {
     if (playlist.length === 1) {
-      // Loop native single item
-      const activeVid = activeSlotRef.current === 'A' ? videoARef.current : videoBRef.current;
-      if (activeVid) {
+      if (videoRef.current) {
         try {
-          activeVid.currentTime = 0;
-          playSafe(activeVid);
+          videoRef.current.currentTime = 0;
+          playSafe(videoRef.current);
         } catch (_) {}
       }
       return;
@@ -690,27 +613,22 @@ const VisorTV = () => {
     goToNext();
   };
 
-  // Debounced error handler with infinite loop resilience (Rule R3.2)
-  const handleMediaError = useCallback(
-    (slot, err) => {
-      console.warn(`Media playback error in Slot ${slot}:`, err);
-      if (errorCooldownRef.current) return;
-      consecutiveErrorsRef.current += 1;
+  // Debounced error handler with infinite loop resilience
+  const handleMediaError = useCallback((err) => {
+    console.warn('Media playback error encountered:', err);
+    if (errorCooldownRef.current) return;
+    consecutiveErrorsRef.current += 1;
 
-      // Never halt or display fatal error screen on TVs; continue the infinite cycle seamlessly
-      errorCooldownRef.current = setTimeout(() => {
-        errorCooldownRef.current = null;
-        transitionInProgressRef.current = false;
-        goToNext();
-      }, 1500);
-    },
-    [goToNext]
-  );
+    errorCooldownRef.current = setTimeout(() => {
+      errorCooldownRef.current = null;
+      goToNext();
+    }, 1200);
+  }, [goToNext]);
 
-  // Anti-Freeze & Buffer Stall Watchdog (Rule R3.1)
+  // Single-Decoder Anti-Freeze Stall Watchdog
   useEffect(() => {
     if (isPaused || playlist.length === 0) return;
-    const activeVideo = activeSlot === 'A' ? videoARef.current : videoBRef.current;
+    const activeVideo = videoRef.current;
     const activeItem = playlist[currentIndex];
     if (!activeVideo || !activeItem || activeItem.type !== 'video' || isEmbedVideo) {
       stallCounterRef.current = 0;
@@ -719,21 +637,16 @@ const VisorTV = () => {
     }
 
     const watchdogInterval = setInterval(() => {
-      if (isPaused || activeVideo.ended || transitionInProgressRef.current) {
-        return;
-      }
+      if (isPaused || activeVideo.ended) return;
 
       const current = activeVideo.currentTime;
 
-      // Case 1: Video is unexpectedly paused (e.g. TV buffer underrun or blocked autoplay)
       if (activeVideo.paused) {
         stallCounterRef.current += 1;
         if (stallCounterRef.current >= 3) {
-          console.warn('Watchdog: active video paused unexpectedly, attempting playSafe recovery');
           playSafe(activeVideo);
         }
         if (stallCounterRef.current >= 7) {
-          console.warn('Watchdog: active video stuck paused for >7s, forcing advance to next item');
           stallCounterRef.current = 0;
           lastTimeRef.current = -1;
           goToNext();
@@ -741,83 +654,33 @@ const VisorTV = () => {
         return;
       }
 
-      // Case 2: Video is playing, but currentTime is not advancing (frozen decoder or stalled chunk)
       if (lastTimeRef.current >= 0 && Math.abs(current - lastTimeRef.current) < 0.1) {
         stallCounterRef.current += 1;
-        // Stalled for > 4 seconds: micro-recovery nudge
         if (stallCounterRef.current === 4) {
-          console.warn('Watchdog: video stall detected (>4s), executing micro-recovery');
           try {
             activeVideo.currentTime += 0.05;
             playSafe(activeVideo);
           } catch (_) {}
         }
-        // Stalled for > 7 seconds: force advance to next item
         if (stallCounterRef.current >= 7) {
-          console.warn('Watchdog: video remains stalled (>7s), forcing advance to next item');
           stallCounterRef.current = 0;
           lastTimeRef.current = -1;
           goToNext();
         }
       } else {
         stallCounterRef.current = 0;
-        lastTimeRef.current = current;
       }
+
+      lastTimeRef.current = current;
     }, 1000);
 
     return () => clearInterval(watchdogInterval);
-  }, [activeSlot, currentIndex, isPaused, playlist, isEmbedVideo, goToNext, playSafe]);
+  }, [currentIndex, isPaused, playlist, isEmbedVideo, playSafe, goToNext]);
 
-  // Keyboard Shortcuts
-  useEffect(() => {
-    const handleKeyDown = (e) => {
-      if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') {
-        return;
-      }
-
-      switch (e.key) {
-        case ' ':
-          e.preventDefault();
-          setIsPaused((prev) => !prev);
-          break;
-        case 'ArrowRight':
-          e.preventDefault();
-          goToNext();
-          break;
-        case 'ArrowLeft':
-          e.preventDefault();
-          goToPrev();
-          break;
-        case 'm':
-        case 'M':
-          setIsMuted((prev) => !prev);
-          break;
-        case 'f':
-        case 'F':
-          toggleFullscreen();
-          break;
-        case 'a':
-        case 'A':
-          toggleFitMode();
-          break;
-        case '?':
-        case 'h':
-        case 'H':
-          setShowHelpModal((prev) => !prev);
-          break;
-        default:
-          break;
-      }
-    };
-
-    window.addEventListener('keydown', handleKeyDown);
-    return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [goToNext, goToPrev, toggleFullscreen, toggleFitMode]);
-
-  // 1. Loading State
-  if (isLoading) {
+  // 1. Initial Fullscreen Loading State (Pure Black Background)
+  if (isLoading && playlist.length === 0) {
     return (
-      <div className="h-screen w-screen flex flex-col items-center justify-center p-6 bg-black text-white">
+      <div className="fixed inset-0 w-full h-full flex flex-col items-center justify-center p-6 bg-black text-white select-none overflow-hidden z-50">
         <div className="relative">
           <div className="w-16 h-16 rounded-2xl bg-slate-900 border border-slate-800 flex items-center justify-center animate-pulse shadow-2xl">
             <Tv className="w-8 h-8 text-rose-500" />
@@ -833,22 +696,25 @@ const VisorTV = () => {
     );
   }
 
-  // 2. Error State
-  if (error || !sede) {
+  // 2. Error / Reconnecting State (Pure Black, Self-Healing)
+  if (error && playlist.length === 0) {
     return (
-      <div className="h-screen w-screen flex flex-col items-center justify-center p-6 bg-black text-white text-center">
+      <div className="fixed inset-0 w-full h-full flex flex-col items-center justify-center p-6 bg-black text-white text-center select-none overflow-hidden z-50">
         <div className="max-w-md p-8 rounded-3xl border border-slate-800 bg-slate-900/95 shadow-2xl backdrop-blur-md">
-          <div className="w-16 h-16 rounded-2xl bg-rose-500/10 border border-rose-500/20 text-rose-500 flex items-center justify-center mx-auto mb-4">
+          <div className="w-16 h-16 rounded-2xl bg-rose-500/10 border border-rose-500/20 text-rose-500 flex items-center justify-center mx-auto mb-4 animate-pulse">
             <Tv className="w-8 h-8" />
           </div>
           <h2 className="text-xl font-bold mb-2">Canal No Disponible</h2>
-          <p className="text-xs text-slate-400 mb-6 leading-relaxed">{error || 'La sede solicitada no existe o no se encuentra habilitada.'}</p>
+          <p className="text-xs text-slate-400 mb-6 leading-relaxed">{error}</p>
+          <p className="text-[11px] text-rose-400 font-mono mb-4 animate-pulse">
+            Reintentando conexión automáticamente en segundo plano...
+          </p>
           <div className="flex gap-3 justify-center">
             <button
               onClick={() => loadPlaylist(true)}
-              className="px-4 py-2 rounded-xl text-xs font-semibold text-white bg-gradient-to-r from-rose-600 to-red-600 hover:from-rose-500 hover:to-red-500 shadow-lg shadow-rose-600/30 transition-transform active:scale-95 cursor-pointer"
+              className="px-5 py-2.5 rounded-xl text-xs font-semibold text-white bg-gradient-to-r from-rose-600 to-red-600 hover:from-rose-500 hover:to-red-500 shadow-lg shadow-rose-600/30 transition-transform active:scale-95 cursor-pointer"
             >
-              Reintentar
+              Reintentar Ahora
             </button>
             <button
               onClick={() => navigate('/')}
@@ -862,10 +728,10 @@ const VisorTV = () => {
     );
   }
 
-  // 3. Empty Playlist State
-  if (playlist.length === 0) {
+  // 3. Empty Playlist Standby State
+  if (playlist.length === 0 && sede) {
     return (
-      <div className="h-screen w-screen flex flex-col items-center justify-center p-6 text-center relative overflow-hidden bg-black text-white">
+      <div className="fixed inset-0 w-full h-full flex flex-col items-center justify-center p-6 text-center select-none overflow-hidden bg-black text-white z-50">
         <div className="absolute top-8 left-8 flex items-center gap-3">
           {isImageUrl(sede.icon) ? (
             <div className="w-12 h-12 rounded-xl border border-white/20 shadow-lg overflow-hidden bg-white/10 shrink-0">
@@ -923,140 +789,76 @@ const VisorTV = () => {
     );
   }
 
-  // Items for Slot A and Slot B
-  const itemA = playlist[slotAIndex] || null;
-  const itemB = playlist[slotBIndex] || null;
+  const effectiveFit = getEffectiveFit(currentItem);
 
   return (
     <div
       ref={containerRef}
-      className={`relative w-screen h-screen overflow-hidden select-none bg-black text-white ${
+      className={`fixed inset-0 w-full h-full overflow-hidden select-none bg-black text-white touch-none overscroll-none ${
         showControls ? 'cursor-default' : 'cursor-none'
       }`}
       onMouseMove={handleUserActivity}
       onClick={handleUserActivity}
       onDoubleClick={toggleFullscreen}
     >
-      {/* ================= DOUBLE BUFFERING SLOT A (PERSISTENT HARDWARE-ACCELERATED) ================= */}
-      <div
-        className={`absolute inset-0 w-full h-full flex items-center justify-center transition-opacity duration-500 ease-in-out transform-gpu will-change-opacity ${
-          activeSlot === 'A' ? 'opacity-100 z-10' : 'opacity-0 z-0 pointer-events-none'
-        }`}
-      >
-        {itemA && itemA.type === 'video' ? (
-          getEmbedUrl(itemA.url) ? (
-            <iframe
-              key={`embed-a-${itemA.id}`}
-              src={getEmbedUrl(itemA.url)}
-              className="w-full h-full border-0 pointer-events-none"
-              allow="autoplay; encrypted-media; picture-in-picture"
-              title={itemA.title || 'Embed Video A'}
-            />
-          ) : (
-            <video
-              key={`video-a-${itemA.id}`}
-              ref={videoARef}
-              src={resolveMediaUrl(itemA.url)}
-              muted={isMuted || activeSlot !== 'A'}
-              loop={playlist.length === 1}
-              playsInline
-              preload="auto"
-              disablePictureInPicture
-              controlsList="nodownload nofullscreen noremoteplayback"
-              onLoadedData={() => {
-                if (activeSlot === 'A' && !isPaused) {
-                  playSafe(videoARef.current);
-                }
-              }}
-              onPlaying={() => {
-                consecutiveErrorsRef.current = 0;
-                if (pendingTransitionRef.current?.slot === 'A') {
-                  pendingTransitionRef.current.complete();
-                }
-              }}
-              onTimeUpdate={activeSlot === 'A' ? handleVideoTimeUpdate : undefined}
-              onEnded={activeSlot === 'A' ? handleVideoEnded : undefined}
-              onError={(e) => handleMediaError('A', e)}
-              className={`w-full h-full max-w-full max-h-full transition-all duration-300 ${
-                getEffectiveFit(itemA) === 'cover' ? 'object-cover' : 'object-contain'
-              } ${getEffectiveFit(itemA) !== 'contain' ? 'tv-video-enhanced' : ''}`}
-              style={{ imageRendering: '-webkit-optimize-contrast' }}
-            />
-          )
-        ) : itemA ? (
-          <img
-            key={`img-a-${itemA.id}`}
-            src={resolveMediaUrl(itemA.url)}
-            alt={itemA.title || 'Visor TV Media A'}
-            fetchPriority={activeSlot === 'A' ? 'high' : 'auto'}
-            decoding="async"
-            onError={(e) => handleMediaError('A', e)}
-            className={`w-full h-full max-w-full max-h-full ${
-              getEffectiveFit(itemA) === 'cover' ? 'object-cover' : 'object-contain'
-            }`}
-          />
-        ) : null}
-      </div>
+      {/* ================= SINGLE-DECODER MEDIA SURFACE (Zero Black Screen Engine) ================= */}
+      <div className="absolute inset-0 w-full h-full flex items-center justify-center overflow-hidden">
+        {/* Persistent Single Video Element (Always mounted, zero decoder reinstalls on Smart TVs) */}
+        <video
+          key="persistent-tv-video"
+          ref={videoRef}
+          src={currentItem?.type === 'video' && !isEmbedVideo ? resolveMediaUrl(currentItem.url) : undefined}
+          muted={isMuted}
+          loop={playlist.length === 1}
+          playsInline
+          preload="auto"
+          disablePictureInPicture
+          controlsList="nodownload nofullscreen noremoteplayback"
+          onLoadedData={() => {
+            if (!isPaused && currentItem?.type === 'video' && !isEmbedVideo) {
+              playSafe(videoRef.current);
+            }
+          }}
+          onPlaying={() => {
+            consecutiveErrorsRef.current = 0;
+            setVideoTransitioning(false);
+          }}
+          onTimeUpdate={handleVideoTimeUpdate}
+          onEnded={handleVideoEnded}
+          onError={handleMediaError}
+          className={`absolute inset-0 w-full h-full max-w-full max-h-full transition-opacity duration-300 ease-in-out ${
+            effectiveFit === 'cover' ? 'object-cover' : 'object-contain'
+          } ${effectiveFit !== 'contain' ? 'tv-video-enhanced' : ''} ${
+            currentItem?.type === 'video' && !isEmbedVideo ? 'opacity-100 z-10' : 'opacity-0 z-0 pointer-events-none'
+          }`}
+          style={{ imageRendering: '-webkit-optimize-contrast' }}
+        />
 
-      {/* ================= DOUBLE BUFFERING SLOT B (PERSISTENT HARDWARE-ACCELERATED) ================= */}
-      <div
-        className={`absolute inset-0 w-full h-full flex items-center justify-center transition-opacity duration-500 ease-in-out transform-gpu will-change-opacity ${
-          activeSlot === 'B' ? 'opacity-100 z-10' : 'opacity-0 z-0 pointer-events-none'
-        }`}
-      >
-        {itemB && itemB.type === 'video' ? (
-          getEmbedUrl(itemB.url) ? (
-            <iframe
-              key={`embed-b-${itemB.id}`}
-              src={getEmbedUrl(itemB.url)}
-              className="w-full h-full border-0 pointer-events-none"
-              allow="autoplay; encrypted-media; picture-in-picture"
-              title={itemB.title || 'Embed Video B'}
-            />
-          ) : (
-            <video
-              key={`video-b-${itemB.id}`}
-              ref={videoBRef}
-              src={resolveMediaUrl(itemB.url)}
-              muted={isMuted || activeSlot !== 'B'}
-              loop={playlist.length === 1}
-              playsInline
-              preload="auto"
-              disablePictureInPicture
-              controlsList="nodownload nofullscreen noremoteplayback"
-              onLoadedData={() => {
-                if (activeSlot === 'B' && !isPaused) {
-                  playSafe(videoBRef.current);
-                }
-              }}
-              onPlaying={() => {
-                consecutiveErrorsRef.current = 0;
-                if (pendingTransitionRef.current?.slot === 'B') {
-                  pendingTransitionRef.current.complete();
-                }
-              }}
-              onTimeUpdate={activeSlot === 'B' ? handleVideoTimeUpdate : undefined}
-              onEnded={activeSlot === 'B' ? handleVideoEnded : undefined}
-              onError={(e) => handleMediaError('B', e)}
-              className={`w-full h-full max-w-full max-h-full transition-all duration-300 ${
-                getEffectiveFit(itemB) === 'cover' ? 'object-cover' : 'object-contain'
-              } ${getEffectiveFit(itemB) !== 'contain' ? 'tv-video-enhanced' : ''}`}
-              style={{ imageRendering: '-webkit-optimize-contrast' }}
-            />
-          )
-        ) : itemB ? (
+        {/* Dedicated Image Presentation Layer (Lightweight, 0 hardware decoder conflicts) */}
+        {currentItem?.type === 'image' && (
           <img
-            key={`img-b-${itemB.id}`}
-            src={resolveMediaUrl(itemB.url)}
-            alt={itemB.title || 'Visor TV Media B'}
-            fetchPriority={activeSlot === 'B' ? 'high' : 'auto'}
+            key={`img-${currentItem.id}`}
+            src={resolveMediaUrl(currentItem.url)}
+            alt={currentItem.title || 'Visor TV Media'}
+            fetchPriority="high"
             decoding="async"
-            onError={(e) => handleMediaError('B', e)}
-            className={`w-full h-full max-w-full max-h-full ${
-              getEffectiveFit(itemB) === 'cover' ? 'object-cover' : 'object-contain'
-            }`}
+            onError={handleMediaError}
+            className={`absolute inset-0 w-full h-full max-w-full max-h-full transition-opacity duration-500 ease-in-out z-10 ${
+              effectiveFit === 'cover' ? 'object-cover' : 'object-contain'
+            } ${videoTransitioning ? 'opacity-90' : 'opacity-100'}`}
           />
-        ) : null}
+        )}
+
+        {/* Dedicated External Embed Layer (YouTube / Vimeo) */}
+        {isEmbedVideo && (
+          <iframe
+            key={`embed-${currentItem.id}`}
+            src={getEmbedUrl(currentItem.url)}
+            className="absolute inset-0 w-full h-full border-0 pointer-events-none z-10"
+            allow="autoplay; encrypted-media; picture-in-picture"
+            title={currentItem.title || 'Embed Video'}
+          />
+        )}
       </div>
 
       {/* ================= UNMUTE PROMPT BANNER (if muted) ================= */}
@@ -1065,14 +867,21 @@ const VisorTV = () => {
           onClick={(e) => {
             e.stopPropagation();
             setIsMuted(false);
-            const activeVideo = activeSlot === 'A' ? videoARef.current : videoBRef.current;
-            if (activeVideo) activeVideo.muted = false;
+            if (videoRef.current) videoRef.current.muted = false;
           }}
           className="absolute top-20 left-1/2 -translate-x-1/2 z-30 flex items-center gap-2 px-5 py-2.5 rounded-full bg-gradient-to-r from-rose-600 to-red-600 hover:from-rose-500 hover:to-red-500 text-white text-xs font-semibold shadow-2xl shadow-rose-600/40 backdrop-blur-md transition-transform hover:scale-105 cursor-pointer"
         >
           <VolumeX className="w-4 h-4 animate-pulse" />
           <span>Audio silenciado • Clic para activar sonido (o presione M)</span>
         </button>
+      )}
+
+      {/* ================= OFFLINE STATUS BADGE (Non-blocking) ================= */}
+      {isOfflineMode && (
+        <div className="absolute top-20 right-6 z-30 flex items-center gap-2 px-3 py-1.5 rounded-xl bg-amber-500/20 border border-amber-500/30 text-amber-300 text-[11px] font-medium backdrop-blur-md shadow-lg animate-pulse">
+          <span className="w-2 h-2 rounded-full bg-amber-400" />
+          <span>Modo sin conexión • Transmitiendo desde caché</span>
+        </div>
       )}
 
       {/* ================= TOP HUD OVERLAY (Auto-hides) ================= */}
@@ -1090,7 +899,7 @@ const VisorTV = () => {
             <ArrowLeft className="w-5 h-5" />
           </button>
 
-          {settings.tv_show_sede_title && (
+          {settings.tv_show_sede_title && sede && (
             <div className="flex items-center gap-3">
               {isImageUrl(sede.icon) ? (
                 <div className="w-10 h-10 rounded-2xl border border-white/20 shadow-xl overflow-hidden bg-white/10 shrink-0">
@@ -1197,8 +1006,7 @@ const VisorTV = () => {
               onClick={() => {
                 const nextMuted = !isMuted;
                 setIsMuted(nextMuted);
-                const activeVideo = activeSlot === 'A' ? videoARef.current : videoBRef.current;
-                if (activeVideo) activeVideo.muted = nextMuted;
+                if (videoRef.current) videoRef.current.muted = nextMuted;
               }}
               title={isMuted ? 'Activar sonido (M)' : 'Silenciar (M)'}
               className={`p-2.5 rounded-2xl border backdrop-blur-xl transition-colors cursor-pointer ${
@@ -1214,22 +1022,22 @@ const VisorTV = () => {
             <button
               onClick={toggleFitMode}
               title={`Modo visual: ${
-                getEffectiveFit(currentItem) === 'cover'
+                effectiveFit === 'cover'
                   ? 'Pantalla completa (Llenar pantalla)'
-                  : getEffectiveFit(currentItem) === 'contain'
+                  : effectiveFit === 'contain'
                   ? 'Ajustar original (Proporcional)'
                   : 'Nitidez Pro'
               }`}
               className={`px-3.5 py-2.5 rounded-2xl text-xs font-semibold border backdrop-blur-xl transition-all cursor-pointer ${
-                getEffectiveFit(currentItem) === 'cover'
+                effectiveFit === 'cover'
                   ? 'bg-rose-600/30 text-rose-200 border-rose-400/50 shadow-md shadow-rose-500/20'
                   : currentTheme.classes.controlBtn
               }`}
             >
               Modo:{' '}
-              {getEffectiveFit(currentItem) === 'cover'
+              {effectiveFit === 'cover'
                 ? 'Pantalla Completa'
-                : getEffectiveFit(currentItem) === 'contain'
+                : effectiveFit === 'contain'
                 ? 'Ajustar'
                 : 'Nitidez Pro'}
             </button>
