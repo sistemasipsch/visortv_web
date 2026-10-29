@@ -680,7 +680,7 @@ const VisorTV = () => {
   // 1. Initial Fullscreen Loading State (Pure Black Background)
   if (isLoading && playlist.length === 0) {
     return (
-      <div className="fixed inset-0 w-full h-full flex flex-col items-center justify-center p-6 bg-black text-white select-none overflow-hidden z-50">
+      <div className="tv-screen-lock flex flex-col items-center justify-center p-6 bg-black text-white select-none z-50">
         <div className="relative">
           <div className="w-16 h-16 rounded-2xl bg-slate-900 border border-slate-800 flex items-center justify-center animate-pulse shadow-2xl">
             <Tv className="w-8 h-8 text-rose-500" />
@@ -699,7 +699,7 @@ const VisorTV = () => {
   // 2. Error / Reconnecting State (Pure Black, Self-Healing)
   if (error && playlist.length === 0) {
     return (
-      <div className="fixed inset-0 w-full h-full flex flex-col items-center justify-center p-6 bg-black text-white text-center select-none overflow-hidden z-50">
+      <div className="tv-screen-lock flex flex-col items-center justify-center p-6 bg-black text-white text-center select-none z-50">
         <div className="max-w-md p-8 rounded-3xl border border-slate-800 bg-slate-900/95 shadow-2xl backdrop-blur-md">
           <div className="w-16 h-16 rounded-2xl bg-rose-500/10 border border-rose-500/20 text-rose-500 flex items-center justify-center mx-auto mb-4 animate-pulse">
             <Tv className="w-8 h-8" />
@@ -731,7 +731,7 @@ const VisorTV = () => {
   // 3. Empty Playlist Standby State
   if (playlist.length === 0 && sede) {
     return (
-      <div className="fixed inset-0 w-full h-full flex flex-col items-center justify-center p-6 text-center select-none overflow-hidden bg-black text-white z-50">
+      <div className="tv-screen-lock flex flex-col items-center justify-center p-6 text-center select-none bg-black text-white z-50">
         <div className="absolute top-8 left-8 flex items-center gap-3">
           {isImageUrl(sede.icon) ? (
             <div className="w-12 h-12 rounded-xl border border-white/20 shadow-lg overflow-hidden bg-white/10 shrink-0">
@@ -794,7 +794,7 @@ const VisorTV = () => {
   return (
     <div
       ref={containerRef}
-      className={`fixed inset-0 w-full h-full overflow-hidden select-none bg-black text-white touch-none overscroll-none ${
+      className={`tv-screen-lock select-none bg-black text-white overscroll-none ${
         showControls ? 'cursor-default' : 'cursor-none'
       }`}
       onMouseMove={handleUserActivity}

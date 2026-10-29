@@ -1,32 +1,13 @@
 import React, { Suspense, lazy } from 'react';
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
-import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { AuthProvider } from './context/AuthContext';
-import { useAuth } from './context/useAuth';
 
-// Ultra-fast client cache configuration
-export const queryClient = new QueryClient({
-  defaultOptions: {
-    queries: {
-      staleTime: 5 * 60 * 1000, // 5 minutes cache
-      gcTime: 15 * 60 * 1000,
-      refetchOnWindowFocus: false,
-      retry: 1,
-    },
-  },
-});
-
-// Lazy-loaded Pages for Maximum Performance & Instant Load
+// Lazy-loaded Pages for Maximum Performance & Instant Smart TV Load
 const SedesSelection = lazy(() => import('./pages/SedesSelection'));
 const VisorTV = lazy(() => import('./pages/VisorTV'));
-const AdminLogin = lazy(() => import('./pages/AdminLogin'));
-const AdminLayout = lazy(() => import('./layouts/AdminLayout'));
-const AdminDashboard = lazy(() => import('./pages/AdminDashboard'));
-const AdminSedes = lazy(() => import('./pages/AdminSedes'));
-const AdminMedia = lazy(() => import('./pages/AdminMedia'));
-const AdminUsers = lazy(() => import('./pages/AdminUsers'));
-const AdminAudit = lazy(() => import('./pages/AdminAudit'));
-const AdminSettings = lazy(() => import('./pages/AdminSettings'));
+
+// Deferred Admin Module (includes React Query, AuthContext, Admin Layout, and Modules)
+// Completely isolated so Smart TVs and Public Kiosk never download or execute admin code!
+const AdminModule = lazy(() => import('./admin/AdminModule'));
 
 class GlobalErrorBoundary extends React.Component {
   constructor(props) {
@@ -68,105 +49,28 @@ const PageLoader = () => (
   </div>
 );
 
-// Protected Route Component for Admin
-const ProtectedRoute = ({ children }) => {
-  const { isAuthenticated, loading } = useAuth();
-
-  if (loading) {
-    return (
-      <div className="h-screen w-screen bg-slate-950 flex items-center justify-center text-white">
-        <div className="text-sm font-medium text-slate-400">Verificando sesión...</div>
-      </div>
-    );
-  }
-
-  if (!isAuthenticated) {
-    return <Navigate to="/admin/login" replace />;
-  }
-
-  return children;
-};
-
-// Superadmin-only Route Guard
-const SuperadminRoute = ({ children }) => {
-  const { user, isAuthenticated, loading } = useAuth();
-
-  if (loading) {
-    return (
-      <div className="h-full min-h-[50vh] w-full flex items-center justify-center">
-        <div className="text-xs font-semibold text-slate-400">Verificando permisos...</div>
-      </div>
-    );
-  }
-
-  if (!isAuthenticated) {
-    return <Navigate to="/admin/login" replace />;
-  }
-
-  if (user?.role !== 'superadmin') {
-    return <Navigate to="/admin" replace />;
-  }
-
-  return children;
-};
-
 function App() {
   return (
     <GlobalErrorBoundary>
-      <QueryClientProvider client={queryClient}>
-        <AuthProvider>
-          <BrowserRouter>
-            <Suspense fallback={<PageLoader />}>
-            <Routes>
-              {/* Public / TV Kiosk Routes */}
-              <Route path="/" element={<SedesSelection />} />
-              <Route path="/sedes" element={<SedesSelection />} />
-              <Route path="/visor/:slug" element={<VisorTV />} />
-              <Route path="/tv/:slug" element={<VisorTV />} />
+      <BrowserRouter>
+        <Suspense fallback={<PageLoader />}>
+          <Routes>
+            {/* Public TV & Kiosk Routes (Priority #1, ultra-lightweight) */}
+            <Route path="/" element={<SedesSelection />} />
+            <Route path="/sedes" element={<SedesSelection />} />
+            <Route path="/visor/:slug" element={<VisorTV />} />
+            <Route path="/tv/:slug" element={<VisorTV />} />
 
-              {/* Admin Authentication */}
-              <Route path="/admin/login" element={<AdminLogin />} />
+            {/* Admin Management (Deferred / Lazy-loaded on demand post-login) */}
+            <Route path="/admin/*" element={<AdminModule />} />
 
-              {/* Admin Protected Dashboard Routes */}
-              <Route
-                path="/admin"
-                element={
-                  <ProtectedRoute>
-                    <AdminLayout />
-                  </ProtectedRoute>
-                }
-              >
-                <Route index element={<AdminDashboard />} />
-                <Route path="sedes" element={<AdminSedes />} />
-                <Route path="media" element={<AdminMedia />} />
-                <Route
-                  path="users"
-                  element={
-                    <SuperadminRoute>
-                      <AdminUsers />
-                    </SuperadminRoute>
-                  }
-                />
-                <Route
-                  path="audit"
-                  element={
-                    <SuperadminRoute>
-                      <AdminAudit />
-                    </SuperadminRoute>
-                  }
-                />
-                <Route path="settings" element={<AdminSettings />} />
-              </Route>
-
-              {/* Fallback */}
-              <Route path="*" element={<Navigate to="/" replace />} />
-            </Routes>
-          </Suspense>
-        </BrowserRouter>
-      </AuthProvider>
-    </QueryClientProvider>
-  </GlobalErrorBoundary>
-);
+            {/* Fallback */}
+            <Route path="*" element={<Navigate to="/" replace />} />
+          </Routes>
+        </Suspense>
+      </BrowserRouter>
+    </GlobalErrorBoundary>
+  );
 }
 
 export default App;
