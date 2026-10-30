@@ -306,14 +306,15 @@ const AdminLayout = () => {
 
           <div className="flex items-center gap-3">
             {/* Quick Open Kiosk button */}
-            <NavLink
-              to="/"
+            <a
+              href="/"
               target="_blank"
+              rel="noopener noreferrer"
               className="inline-flex items-center gap-2 px-3.5 py-1.5 rounded-xl text-xs font-bold text-[#0049EA] bg-blue-50/80 hover:bg-blue-100/80 border border-blue-200/60 transition-all shadow-xs"
             >
               <MonitorPlay className="w-3.5 h-3.5" />
               <span className="hidden sm:inline">Ver Kiosco</span>
-            </NavLink>
+            </a>
 
             {/* Status Chip with cyan pulse */}
             <div className="hidden sm:flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-emerald-50 text-emerald-700 border border-emerald-200/70 text-xs font-bold">

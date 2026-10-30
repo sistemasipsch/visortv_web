@@ -2,6 +2,12 @@
   RewriteEngine On
   RewriteBase /
   RewriteRule ^index\.html$ - [L]
+  RewriteRule ^admin\.html$ - [L]
+
+  # Route /admin to admin.html for the Admin Management Portal
+  RewriteRule ^admin(/.*)?$ /admin.html [L,QSA]
+
+  # Route all other public routes (TV, visor, sedes) to index.html
   RewriteCond %{REQUEST_FILENAME} !-f
   RewriteCond %{REQUEST_FILENAME} !-d
   RewriteCond %{REQUEST_FILENAME} !-l

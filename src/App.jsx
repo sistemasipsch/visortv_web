@@ -5,10 +5,6 @@ import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
 const SedesSelection = lazy(() => import('./pages/SedesSelection'));
 const VisorTV = lazy(() => import('./pages/VisorTV'));
 
-// Deferred Admin Module (includes React Query, AuthContext, Admin Layout, and Modules)
-// Completely isolated so Smart TVs and Public Kiosk never download or execute admin code!
-const AdminModule = lazy(() => import('./admin/AdminModule'));
-
 class GlobalErrorBoundary extends React.Component {
   constructor(props) {
     super(props);
@@ -59,8 +55,17 @@ function App() {
             <Route path="/visor/:slug" element={<VisorTV />} />
             <Route path="/tv/:slug" element={<VisorTV />} />
 
-            {/* Admin Management (Deferred / Lazy-loaded on demand post-login) */}
-            <Route path="/admin/*" element={<AdminModule />} />
+            {/* Seamless handover to isolated Admin Portal if accessed via TV entry */}
+            <Route
+              path="/admin/*"
+              element={
+                <div
+                  ref={() => {
+                    window.location.href = '/admin';
+                  }}
+                />
+              }
+            />
 
             {/* Fallback */}
             <Route path="*" element={<Navigate to="/" replace />} />
