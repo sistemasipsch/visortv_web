@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
-import { useParams, useNavigate } from 'react-router-dom';
+import { useParams, useNavigate, Link } from 'react-router-dom';
 import { playlistService, resolveMediaUrl } from '../services/api';
 import mediaCacheManager from '../services/mediaCacheManager';
 import IconRenderer from '../components/IconRenderer';
@@ -893,12 +893,12 @@ const VisorTV = () => {
             Agregue contenido desde el panel de administración para comenzar la transmisión automática.
           </p>
           <div className="flex flex-col sm:flex-row items-center justify-center gap-3">
-            <a
-              href="/admin/media"
+            <Link
+              to="/admin/media"
               className="w-full sm:w-auto px-5 py-2.5 text-white bg-gradient-to-r from-rose-600 to-red-600 hover:from-rose-500 hover:to-red-500 rounded-xl text-xs font-semibold shadow-lg shadow-rose-600/30 transition-all flex items-center justify-center gap-2 cursor-pointer"
             >
               <span>Subir Contenido en Admin</span>
-            </a>
+            </Link>
             <button
               onClick={() => navigate('/')}
               className="w-full sm:w-auto px-5 py-2.5 rounded-xl text-xs font-semibold transition-all flex items-center justify-center gap-2 border border-slate-700 bg-slate-800 hover:bg-slate-700 text-slate-300 cursor-pointer"

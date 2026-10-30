@@ -126,13 +126,13 @@ const SedesSelection = () => {
             </span>
           </div>
 
-          <a
-            href="/admin"
+          <Link
+            to="/admin"
             className="flex items-center gap-2 px-4 py-2 rounded-xl bg-gradient-to-r from-[#0049EA] to-[#0284c7] hover:from-[#003bbd] hover:to-[#0275b1] text-white text-xs font-bold shadow-md shadow-blue-600/25 transition-all"
           >
             <ShieldLock className="w-4 h-4" />
             <span>Panel Admin</span>
-          </a>
+          </Link>
         </div>
       </header>
 
@@ -323,12 +323,12 @@ const SedesSelection = () => {
                 ? 'Ninguna sede coincide con el filtro de búsqueda ingresado.'
                 : 'No hay sedes configuradas o activas actualmente.'}
             </p>
-            <a
-              href="/admin/sedes"
+            <Link
+              to="/admin/sedes"
               className="inline-flex items-center gap-2 mt-4 px-4 py-2 bg-gradient-to-r from-[#0049EA] to-[#0284c7] text-white rounded-xl text-xs font-bold shadow-md shadow-blue-600/20 hover:scale-105 transition-all"
             >
               Configurar Sedes en Panel Admin
-            </a>
+            </Link>
           </div>
         )}
       </main>

@@ -81,7 +81,6 @@ export default function AdminModule() {
           <Routes>
             <Route path="login" element={<AdminLogin />} />
             <Route
-              path="/"
               element={
                 <ProtectedRoute>
                   <AdminLayout />
