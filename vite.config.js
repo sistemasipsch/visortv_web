@@ -31,7 +31,7 @@ export default defineConfig({
     }
   },
   build: {
-    target: 'esnext',
+    target: 'es2018',
     chunkSizeWarningLimit: 1000,
     rollupOptions: {
       output: {

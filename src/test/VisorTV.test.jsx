@@ -4,14 +4,26 @@ import { render, screen, waitFor, act, fireEvent } from '@testing-library/react'
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import VisorTV from '../pages/VisorTV';
 import { playlistService } from '../services/api';
+import mediaCacheManager from '../services/mediaCacheManager';
 
 describe('VisorTV component', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    localStorage.clear();
   });
 
-  it('renders loading state initially', () => {
-    vi.spyOn(playlistService, 'getPlaylist').mockImplementation(() => new Promise(() => {}));
+  it('renders instantly from cached package without any loading text or spinner', async () => {
+    localStorage.setItem(
+      'visor_tv_cache_sede-principal',
+      JSON.stringify({
+        success: true,
+        sede: { id: 1, name: 'Sede Principal', slug: 'sede-principal', icon: 'Tv', color: '#0049EA' },
+        playlist: [
+          { id: 1, title: 'Item 1', type: 'image', url: 'https://example.com/1.jpg', duration: 10 },
+        ],
+        settings: { tv_show_clock: true, tv_show_sede_title: true },
+      })
+    );
 
     render(
       <MemoryRouter initialEntries={['/visor/sede-principal']}>
@@ -21,7 +33,25 @@ describe('VisorTV component', () => {
       </MemoryRouter>
     );
 
-    expect(screen.getByText(/Cargando Visor TV/i)).toBeInTheDocument();
+    // Patients should NEVER see "Cargando Visor TV"
+    expect(screen.queryByText(/Cargando Visor TV/i)).not.toBeInTheDocument();
+    // Should immediately render the cached sede title
+    expect(screen.getAllByText(/Sede Principal/i)[0]).toBeInTheDocument();
+  });
+
+  it('never displays uncomfortable loading text when starting without cache', () => {
+    vi.spyOn(playlistService, 'getPlaylist').mockImplementation(() => new Promise(() => {}));
+
+    render(
+      <MemoryRouter initialEntries={['/visor/sede-sin-cache']}>
+        <Routes>
+          <Route path="/visor/:slug" element={<VisorTV />} />
+        </Routes>
+      </MemoryRouter>
+    );
+
+    // Patients should never see "Cargando Visor TV"
+    expect(screen.queryByText(/Cargando Visor TV/i)).not.toBeInTheDocument();
   });
 
   it('renders empty standby state when playlist is empty', async () => {
@@ -322,5 +352,142 @@ describe('VisorTV component', () => {
     // Should never render the fatal error screen
     expect(screen.queryByText(/Canal No Disponible/i)).not.toBeInTheDocument();
     expect(screen.getAllByText(/Sede Infinita/i)[0]).toBeInTheDocument();
+  });
+
+  it('handles continuous 2-video loops (V1 -> V2 -> V1) without losing source or freezing decoders', async () => {
+    vi.spyOn(playlistService, 'getPlaylist').mockResolvedValue({
+      data: {
+        success: true,
+        version_hash: '2vid-loop-hash',
+        sede: { id: 1, name: 'Sede 2 Videos', slug: 'sede-2-videos' },
+        playlist: [
+          { id: 10, title: 'Video Alfa', type: 'video', url: 'https://example.com/alfa.mp4' },
+          { id: 20, title: 'Video Beta', type: 'video', url: 'https://example.com/beta.mp4' },
+        ],
+        settings: { tv_show_clock: true },
+      },
+    });
+
+    render(
+      <MemoryRouter initialEntries={['/visor/sede-2-videos']}>
+        <Routes>
+          <Route path="/visor/:slug" element={<VisorTV />} />
+        </Routes>
+      </MemoryRouter>
+    );
+
+    await waitFor(() => {
+      expect(screen.getByText('1')).toBeInTheDocument();
+      expect(screen.getByText('/ 2')).toBeInTheDocument();
+    });
+
+    const videos = document.querySelectorAll('video');
+    expect(videos.length).toBe(2);
+    // Slot A starts with Video Alfa
+    expect(videos[0].src).toContain('alfa.mp4');
+
+    const nextBtn = screen.getByTitle(/Siguiente/i);
+
+    // Transition 1: Alfa -> Beta
+    await act(async () => {
+      fireEvent.click(nextBtn);
+      // Advance timers by 400ms to allow crossfade and decoder cleanup to complete
+      await new Promise((r) => setTimeout(r, 400));
+    });
+
+    await waitFor(() => {
+      expect(screen.getByText('2')).toBeInTheDocument();
+    });
+    // Slot B now has Video Beta
+    expect(videos[1].src).toContain('beta.mp4');
+
+    // Transition 2: Beta -> Alfa (Loop back)
+    await act(async () => {
+      fireEvent.click(nextBtn);
+      await new Promise((r) => setTimeout(r, 400));
+    });
+
+    await waitFor(() => {
+      expect(screen.getByText('1')).toBeInTheDocument();
+    });
+    // Slot A source must be preserved and re-applied without being cleared or null
+    expect(videos[0].src).toContain('alfa.mp4');
+  });
+
+  it('survives rapid remote control skips without crashing or dropping playback', async () => {
+    vi.spyOn(playlistService, 'getPlaylist').mockResolvedValue({
+      data: {
+        success: true,
+        version_hash: 'rapid-skip-hash',
+        sede: { id: 1, name: 'Sede Rapid Skip', slug: 'sede-rapid-skip' },
+        playlist: [
+          { id: 1, title: 'Item 1', type: 'video', url: 'https://example.com/1.mp4' },
+          { id: 2, title: 'Item 2', type: 'video', url: 'https://example.com/2.mp4' },
+          { id: 3, title: 'Item 3', type: 'video', url: 'https://example.com/3.mp4' },
+          { id: 4, title: 'Item 4', type: 'video', url: 'https://example.com/4.mp4' },
+        ],
+        settings: {},
+      },
+    });
+
+    render(
+      <MemoryRouter initialEntries={['/visor/sede-rapid-skip']}>
+        <Routes>
+          <Route path="/visor/:slug" element={<VisorTV />} />
+        </Routes>
+      </MemoryRouter>
+    );
+
+    await waitFor(() => {
+      expect(screen.getByText('1')).toBeInTheDocument();
+    });
+
+    const nextBtn = screen.getByTitle(/Siguiente/i);
+
+    // Simulate rapid remote spamming (3 clicks under 100ms)
+    await act(async () => {
+      fireEvent.click(nextBtn);
+      fireEvent.click(nextBtn);
+      fireEvent.click(nextBtn);
+    });
+
+    // Should settle on item 4 without unhandled exceptions or broken state
+    await waitFor(() => {
+      expect(screen.getByText('4')).toBeInTheDocument();
+    });
+  });
+
+  it('triggers background preloading via mediaCacheManager on playlist receipt', async () => {
+    const preloadSpy = vi.spyOn(mediaCacheManager, 'preloadSedePackage').mockResolvedValue();
+
+    vi.spyOn(playlistService, 'getPlaylist').mockResolvedValue({
+      data: {
+        success: true,
+        version_hash: 'preload-hash',
+        sede: { id: 1, name: 'Sede Preload', slug: 'sede-preload' },
+        playlist: [
+          { id: 1, title: 'Banner 1', type: 'image', url: 'https://example.com/img1.png' },
+          { id: 2, title: 'Video 1', type: 'video', url: 'https://example.com/vid1.mp4' },
+        ],
+        settings: {},
+      },
+    });
+
+    render(
+      <MemoryRouter initialEntries={['/visor/sede-preload']}>
+        <Routes>
+          <Route path="/visor/:slug" element={<VisorTV />} />
+        </Routes>
+      </MemoryRouter>
+    );
+
+    await waitFor(() => {
+      expect(preloadSpy).toHaveBeenCalledWith(
+        expect.arrayContaining([
+          expect.objectContaining({ id: 1 }),
+          expect.objectContaining({ id: 2 }),
+        ])
+      );
+    });
   });
 });

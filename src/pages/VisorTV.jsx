@@ -1,6 +1,7 @@
-import React, { useState, useEffect, useRef, useCallback } from 'react';
+import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { playlistService, resolveMediaUrl } from '../services/api';
+import mediaCacheManager from '../services/mediaCacheManager';
 import IconRenderer from '../components/IconRenderer';
 import { isImageUrl } from '../constants/icons';
 import { getThemeById } from '../themes/visorThemes';
@@ -46,7 +47,7 @@ const TVClock = React.memo(({ themeClass, isStandby = false }) => {
 
   if (isStandby) {
     return (
-      <div className="absolute top-8 right-8 flex items-center gap-2 px-4 py-2 rounded-xl border border-slate-800 bg-slate-900/90 text-sm font-mono text-white shadow-xl">
+      <div className="absolute top-8 right-8 flex items-center gap-2 px-4 py-2 rounded-xl border border-slate-800 bg-slate-900 text-sm font-mono text-white shadow-xl">
         <Clock className="w-4 h-4 text-rose-500" />
         <span>{time.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}</span>
       </div>
@@ -63,41 +64,68 @@ const TVClock = React.memo(({ themeClass, isStandby = false }) => {
   );
 });
 
+// Explicit video hardware decoder release utility (prevents "Renderer process has crashed!")
+const releaseVideoDecoder = (videoEl) => {
+  if (!videoEl) return;
+  try {
+    videoEl.pause();
+    videoEl.removeAttribute('src');
+    videoEl.load();
+  } catch {}
+};
+
 const VisorTV = () => {
   const { slug } = useParams();
   const navigate = useNavigate();
 
+  // 1. Synchronous Cache Retrieval for Instant Zero-Delay Startup (0ms wait)
+  const initialCache = useMemo(() => {
+    try {
+      const cachedRaw = localStorage.getItem(`visor_tv_cache_${slug}`);
+      if (cachedRaw) {
+        const parsed = JSON.parse(cachedRaw);
+        if (parsed && parsed.sede && Array.isArray(parsed.playlist) && parsed.playlist.length > 0) {
+          return parsed;
+        }
+      }
+    } catch {}
+    return null;
+  }, [slug]);
+
   // Primary State
-  const [playlist, setPlaylist] = useState([]);
-  const [sede, setSede] = useState(null);
-  const [settings, setSettings] = useState({
-    tv_show_clock: true,
-    tv_show_sede_title: true,
-    tv_show_progress_bar: true,
-    tv_auto_refresh_seconds: 30,
-    tv_transition_effect: 'fade',
-  });
+  const [playlist, setPlaylist] = useState(() => initialCache?.playlist || []);
+  const [sede, setSede] = useState(() => initialCache?.sede || null);
+  const [settings, setSettings] = useState(() => ({
+    tv_show_clock: initialCache?.settings?.tv_show_clock !== false,
+    tv_show_sede_title: initialCache?.settings?.tv_show_sede_title !== false,
+    tv_show_progress_bar: initialCache?.settings?.tv_show_progress_bar !== false,
+    tv_auto_refresh_seconds: initialCache?.settings?.tv_auto_refresh_seconds || 30,
+    tv_transition_effect: initialCache?.settings?.tv_transition_effect || 'fade',
+  }));
   const [currentIndex, setCurrentIndex] = useState(0);
-  const [isLoading, setIsLoading] = useState(true);
+  const [isLoading, setIsLoading] = useState(() => !initialCache);
   const [error, setError] = useState(null);
   const [isPaused, setIsPaused] = useState(false);
   const [isMuted, setIsMuted] = useState(false);
   const [isOfflineMode, setIsOfflineMode] = useState(false);
 
+  // Dual-Slot Buffering Engine State (A/B Seamless Transition)
+  const [activeSlot, setActiveSlot] = useState('A');
+  const [slotAItem, setSlotAItem] = useState(() => initialCache?.playlist?.[0] || null);
+  const [slotBItem, setSlotBItem] = useState(null);
+
   // Persistent Fit Mode: default to 'cover' (Pantalla Completa) across all videos until manually changed
   const [userFitOverride, setUserFitOverride] = useState(() => {
     try {
       return localStorage.getItem('visor_tv_fit_mode') || 'cover';
-    } catch (_) {
+    } catch {
       return 'cover';
     }
   });
 
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [showControls, setShowControls] = useState(true);
-  const [versionHash, setVersionHash] = useState('');
   const [showHelpModal, setShowHelpModal] = useState(false);
-  const [videoTransitioning, setVideoTransitioning] = useState(false);
 
   // Direct DOM Refs for Progress Bars (0 React re-renders during video playback)
   const ambientProgressRef = useRef(null);
@@ -111,11 +139,34 @@ const VisorTV = () => {
     if (controlProgressRef.current) controlProgressRef.current.style.width = widthStr;
   }, []);
 
-  // Refs for Media Management
-  const videoRef = useRef(null);
+  // Dual Video Refs for A/B Hardware Decoders
+  const videoRefA = useRef(null);
+  const videoRefB = useRef(null);
+  const activeSlotRef = useRef('A');
+  const slotAItemRef = useRef(slotAItem);
+  const slotBItemRef = useRef(slotBItem);
+
+  useEffect(() => {
+    activeSlotRef.current = activeSlot;
+  }, [activeSlot]);
+
+  useEffect(() => {
+    slotAItemRef.current = slotAItem;
+  }, [slotAItem]);
+
+  useEffect(() => {
+    slotBItemRef.current = slotBItem;
+  }, [slotBItem]);
+
+  const getActiveVideo = useCallback(() => {
+    return activeSlotRef.current === 'A' ? videoRefA.current : videoRefB.current;
+  }, []);
+
   const playPromiseRef = useRef(null);
   const progressTimerRef = useRef(null);
   const controlsTimeoutRef = useRef(null);
+  const transitionTimeoutRef = useRef(null);
+  const loadPlaylistRef = useRef(null);
   const containerRef = useRef(null);
   const latestPlaylistRef = useRef([]);
   const versionHashRef = useRef('');
@@ -145,7 +196,7 @@ const VisorTV = () => {
     setUserFitOverride(newMode);
     try {
       localStorage.setItem('visor_tv_fit_mode', newMode);
-    } catch (_) {}
+    } catch {}
   }, []);
 
   const getEffectiveFit = useCallback(
@@ -234,7 +285,7 @@ const VisorTV = () => {
           videoEl.play().catch(() => {});
         });
       }
-    } catch (_) {}
+    } catch {}
   }, [isMuted]);
 
   const pauseSafe = useCallback((videoEl) => {
@@ -251,16 +302,15 @@ const VisorTV = () => {
       } else {
         videoEl.pause();
       }
-    } catch (_) {}
+    } catch {}
   }, []);
 
   // Auto-activate audio on first TV remote / keyboard / touch interaction
   useEffect(() => {
     const handleFirstInteraction = () => {
       setIsMuted(false);
-      if (videoRef.current) {
-        videoRef.current.muted = false;
-      }
+      if (videoRefA.current) videoRefA.current.muted = false;
+      if (videoRefB.current) videoRefB.current.muted = false;
     };
     window.addEventListener('click', handleFirstInteraction, { once: true });
     window.addEventListener('keydown', handleFirstInteraction, { once: true });
@@ -272,22 +322,22 @@ const VisorTV = () => {
     };
   }, []);
 
-  // Preload upcoming images in background
+  // Preload upcoming images into memory cache using mediaCacheManager
   useEffect(() => {
     if (playlist.length <= 1) return;
     const next1 = playlist[(currentIndex + 1) % playlist.length];
     const next2 = playlist[(currentIndex + 2) % playlist.length];
     [next1, next2].forEach((item) => {
       if (item && item.type === 'image' && item.url) {
-        const preImg = new window.Image();
-        preImg.src = resolveMediaUrl(item.url);
+        mediaCacheManager.preloadImage(resolveMediaUrl(item.url));
       }
     });
   }, [currentIndex, playlist]);
 
   // Load Playlist with LocalStorage Offline Cache Fallback & Auto-Retry
   const loadPlaylist = useCallback(async (isInitial = false) => {
-    if (isInitial && playlist.length === 0) {
+    // Only flag loading if we truly have 0 items available from local cache
+    if (isInitial && latestPlaylistRef.current.length === 0) {
       setIsLoading(true);
     }
 
@@ -298,7 +348,7 @@ const VisorTV = () => {
           if (versionRes.data.success && versionRes.data.version_hash === versionHashRef.current) {
             return;
           }
-        } catch (_) {}
+        } catch {}
       }
 
       const res = await playlistService.getPlaylist(slug);
@@ -309,7 +359,7 @@ const VisorTV = () => {
         // Cache in localStorage for immediate offline restoration on TV reboot
         try {
           localStorage.setItem(`visor_tv_cache_${slug}`, JSON.stringify(res.data));
-        } catch (_) {}
+        } catch {}
 
         setSede(res.data.sede);
         setSettings({
@@ -324,12 +374,17 @@ const VisorTV = () => {
         const prevItems = latestPlaylistRef.current;
         setPlaylist(items);
         latestPlaylistRef.current = items;
-        setVersionHash(res.data.version_hash);
         versionHashRef.current = res.data.version_hash;
+
+        // Background preload entire media package for the active sede
+        mediaCacheManager.preloadSedePackage(items);
 
         if (isInitial) {
           setCurrentIndex(0);
           currentIndexRef.current = 0;
+          if (items.length > 0) {
+            setSlotAItem(items[0]);
+          }
         } else if (items.length > 0) {
           const currentItem = prevItems[currentIndexRef.current];
           const foundIndex = currentItem ? items.findIndex((it) => it.id === currentItem.id) : -1;
@@ -365,16 +420,19 @@ const VisorTV = () => {
             setError(null);
             setIsOfflineMode(true);
             recovered = true;
+            if (slotAItemRef.current === null && cachedData.playlist.length > 0) {
+              setSlotAItem(cachedData.playlist[0]);
+            }
           }
         }
-      } catch (_) {}
+      } catch {}
 
-      if (!recovered && isInitial && playlist.length === 0) {
+      if (!recovered && isInitial && latestPlaylistRef.current.length === 0) {
         setError(err.response?.data?.error || 'No se pudo conectar con el servidor.');
         // Auto-retry connection every 5s on Smart TVs without requiring user interaction
         if (retryTimeoutRef.current) clearTimeout(retryTimeoutRef.current);
         retryTimeoutRef.current = setTimeout(() => {
-          loadPlaylist(true);
+          loadPlaylistRef.current?.(true);
         }, 5000);
       }
     } finally {
@@ -382,7 +440,11 @@ const VisorTV = () => {
         setIsLoading(false);
       }
     }
-  }, [slug, playlist.length]);
+  }, [slug]);
+
+  useEffect(() => {
+    loadPlaylistRef.current = loadPlaylist;
+  }, [loadPlaylist]);
 
   useEffect(() => {
     loadPlaylist(true);
@@ -390,6 +452,21 @@ const VisorTV = () => {
       if (retryTimeoutRef.current) clearTimeout(retryTimeoutRef.current);
     };
   }, [loadPlaylist]);
+
+  // Master cleanup for timers and hardware decoders on component unmount
+  useEffect(() => {
+    const vidA = videoRefA.current;
+    const vidB = videoRefB.current;
+    return () => {
+      if (transitionTimeoutRef.current) clearTimeout(transitionTimeoutRef.current);
+      if (retryTimeoutRef.current) clearTimeout(retryTimeoutRef.current);
+      if (progressTimerRef.current) clearInterval(progressTimerRef.current);
+      if (controlsTimeoutRef.current) clearTimeout(controlsTimeoutRef.current);
+      if (errorCooldownRef.current) clearTimeout(errorCooldownRef.current);
+      releaseVideoDecoder(vidA);
+      releaseVideoDecoder(vidB);
+    };
+  }, []);
 
   // Periodic Polling
   useEffect(() => {
@@ -427,33 +504,83 @@ const VisorTV = () => {
     };
   }, [handleUserActivity]);
 
-  // Transition to specific item
+  // Seamless Dual-Slot A/B Transition Engine (Zero Black Screen, Zero Decoder Memory Leaks)
   const transitionTo = useCallback(
     (targetIndex) => {
       const items = latestPlaylistRef.current;
       if (!items || items.length === 0) return;
 
+      // Cancel any in-flight release timeout to eliminate race conditions during rapid skips
+      if (transitionTimeoutRef.current) {
+        clearTimeout(transitionTimeoutRef.current);
+        transitionTimeoutRef.current = null;
+      }
+
       if (items.length === 1) {
         setCurrentIndex(0);
         currentIndexRef.current = 0;
         updateProgressDom(0);
-        if (videoRef.current) {
+        const activeVid = activeSlotRef.current === 'A' ? videoRefA.current : videoRefB.current;
+        if (activeVid) {
           try {
-            videoRef.current.currentTime = 0;
-            playSafe(videoRef.current);
-          } catch (_) {}
+            activeVid.currentTime = 0;
+            playSafe(activeVid);
+          } catch {}
         }
         return;
       }
 
       const validIndex = ((targetIndex % items.length) + items.length) % items.length;
-      setVideoTransitioning(true);
+      const nextItem = items[validIndex];
+      const currentSlot = activeSlotRef.current;
+      const nextSlot = currentSlot === 'A' ? 'B' : 'A';
+
+      // Load next item into reserve slot and ensure DOM video element source is primed immediately
+      if (nextSlot === 'A') {
+        setSlotAItem(nextItem);
+        if (videoRefA.current && nextItem?.type === 'video' && !getEmbedUrl(nextItem?.url)) {
+          const fullUrl = resolveMediaUrl(nextItem.url);
+          if (videoRefA.current.src !== fullUrl) {
+            videoRefA.current.src = fullUrl;
+            videoRefA.current.load();
+          }
+        }
+      } else {
+        setSlotBItem(nextItem);
+        if (videoRefB.current && nextItem?.type === 'video' && !getEmbedUrl(nextItem?.url)) {
+          const fullUrl = resolveMediaUrl(nextItem.url);
+          if (videoRefB.current.src !== fullUrl) {
+            videoRefB.current.src = fullUrl;
+            videoRefB.current.load();
+          }
+        }
+      }
+
       setCurrentIndex(validIndex);
       currentIndexRef.current = validIndex;
       updateProgressDom(0);
 
-      setTimeout(() => {
-        setVideoTransitioning(false);
+      // Perform smooth crossfade
+      setActiveSlot(nextSlot);
+      activeSlotRef.current = nextSlot;
+
+      // After 350ms crossfade completes: cleanly release previous video decoder context
+      // AND set the released slot state to null so React detects future changes in continuous loops
+      transitionTimeoutRef.current = setTimeout(() => {
+        transitionTimeoutRef.current = null;
+        if (activeSlotRef.current === nextSlot) {
+          const slotToRelease = nextSlot === 'A' ? 'B' : 'A';
+          const inactiveVideo = slotToRelease === 'A' ? videoRefA.current : videoRefB.current;
+          const inactiveItem = slotToRelease === 'A' ? slotAItemRef.current : slotBItemRef.current;
+          if (inactiveItem?.type === 'video') {
+            releaseVideoDecoder(inactiveVideo);
+          }
+          if (slotToRelease === 'A') {
+            setSlotAItem(null);
+          } else {
+            setSlotBItem(null);
+          }
+        }
       }, 350);
     },
     [playSafe, updateProgressDom]
@@ -503,7 +630,8 @@ const VisorTV = () => {
           e.preventDefault();
           setIsMuted((prev) => {
             const next = !prev;
-            if (videoRef.current) videoRef.current.muted = next;
+            if (videoRefA.current) videoRefA.current.muted = next;
+            if (videoRefB.current) videoRefB.current.muted = next;
             return next;
           });
           break;
@@ -538,26 +666,26 @@ const VisorTV = () => {
     return () => window.removeEventListener('keydown', handleRemoteKeys);
   }, [goToNext, goToPrev, toggleFullscreen, toggleFitMode, handleUserActivity, showHelpModal]);
 
-  const currentItem = playlist[currentIndex] || null;
+  const currentItem = playlist[currentIndex] || (activeSlot === 'A' ? slotAItem : slotBItem) || null;
   const isEmbedVideo = currentItem?.type === 'video' && !!getEmbedUrl(currentItem?.url);
 
-  // Active Video Playback Controller (Single-Decoder Smart TV Engine)
+  // Active Video Playback Controller
   useEffect(() => {
-    const video = videoRef.current;
-    if (!video) return;
+    const activeVideo = getActiveVideo();
+    if (!activeVideo) return;
 
     if (!currentItem || currentItem.type !== 'video' || isEmbedVideo) {
-      pauseSafe(video);
+      pauseSafe(activeVideo);
       return;
     }
 
     if (isPaused) {
-      pauseSafe(video);
+      pauseSafe(activeVideo);
       return;
     }
 
-    playSafe(video);
-  }, [currentIndex, isPaused, isMuted, currentItem, isEmbedVideo, playSafe, pauseSafe]);
+    playSafe(activeVideo);
+  }, [currentIndex, activeSlot, isPaused, isMuted, currentItem, isEmbedVideo, getActiveVideo, playSafe, pauseSafe]);
 
   // Auto-advance for Images and External Embeds
   useEffect(() => {
@@ -602,11 +730,12 @@ const VisorTV = () => {
 
   const handleVideoEnded = () => {
     if (playlist.length === 1) {
-      if (videoRef.current) {
+      const vid = getActiveVideo();
+      if (vid) {
         try {
-          videoRef.current.currentTime = 0;
-          playSafe(videoRef.current);
-        } catch (_) {}
+          vid.currentTime = 0;
+          playSafe(vid);
+        } catch {}
       }
       return;
     }
@@ -625,10 +754,10 @@ const VisorTV = () => {
     }, 1200);
   }, [goToNext]);
 
-  // Single-Decoder Anti-Freeze Stall Watchdog
+  // Safe Anti-Freeze Stall Watchdog (Zero dangerous micro-seeks to avoid hardware decoder crash)
   useEffect(() => {
     if (isPaused || playlist.length === 0) return;
-    const activeVideo = videoRef.current;
+    const activeVideo = getActiveVideo();
     const activeItem = playlist[currentIndex];
     if (!activeVideo || !activeItem || activeItem.type !== 'video' || isEmbedVideo) {
       stallCounterRef.current = 0;
@@ -646,7 +775,7 @@ const VisorTV = () => {
         if (stallCounterRef.current >= 3) {
           playSafe(activeVideo);
         }
-        if (stallCounterRef.current >= 7) {
+        if (stallCounterRef.current >= 6) {
           stallCounterRef.current = 0;
           lastTimeRef.current = -1;
           goToNext();
@@ -656,13 +785,10 @@ const VisorTV = () => {
 
       if (lastTimeRef.current >= 0 && Math.abs(current - lastTimeRef.current) < 0.1) {
         stallCounterRef.current += 1;
-        if (stallCounterRef.current === 4) {
-          try {
-            activeVideo.currentTime += 0.05;
-            playSafe(activeVideo);
-          } catch (_) {}
+        if (stallCounterRef.current === 3) {
+          playSafe(activeVideo);
         }
-        if (stallCounterRef.current >= 7) {
+        if (stallCounterRef.current >= 6) {
           stallCounterRef.current = 0;
           lastTimeRef.current = -1;
           goToNext();
@@ -675,32 +801,18 @@ const VisorTV = () => {
     }, 1000);
 
     return () => clearInterval(watchdogInterval);
-  }, [currentIndex, isPaused, playlist, isEmbedVideo, playSafe, goToNext]);
+  }, [currentIndex, isPaused, playlist, isEmbedVideo, getActiveVideo, playSafe, goToNext]);
 
-  // 1. Initial Fullscreen Loading State (Pure Black Background)
+  // 1. Initial Loading State: Silent pure black screen (zero spinners or text shown to patients)
   if (isLoading && playlist.length === 0) {
-    return (
-      <div className="tv-screen-lock flex flex-col items-center justify-center p-6 bg-black text-white select-none z-50">
-        <div className="relative">
-          <div className="w-16 h-16 rounded-2xl bg-slate-900 border border-slate-800 flex items-center justify-center animate-pulse shadow-2xl">
-            <Tv className="w-8 h-8 text-rose-500" />
-          </div>
-          <span className="absolute -top-1 -right-1 flex h-4 w-4">
-            <span className="animate-ping absolute inline-flex h-full w-full rounded-full opacity-75 bg-rose-500" />
-            <span className="relative inline-flex rounded-full h-4 w-4 bg-rose-600" />
-          </span>
-        </div>
-        <p className="mt-4 text-sm font-mono tracking-wider font-semibold text-white">Cargando Visor TV...</p>
-        <p className="text-xs mt-1 text-slate-400">Conectando a {slug}...</p>
-      </div>
-    );
+    return <div className="tv-screen-lock bg-black text-white select-none z-50 pointer-events-none" />;
   }
 
   // 2. Error / Reconnecting State (Pure Black, Self-Healing)
   if (error && playlist.length === 0) {
     return (
       <div className="tv-screen-lock flex flex-col items-center justify-center p-6 bg-black text-white text-center select-none z-50">
-        <div className="max-w-md p-8 rounded-3xl border border-slate-800 bg-slate-900/95 shadow-2xl backdrop-blur-md">
+        <div className="max-w-md p-8 rounded-3xl border border-slate-800 bg-slate-900 shadow-2xl">
           <div className="w-16 h-16 rounded-2xl bg-rose-500/10 border border-rose-500/20 text-rose-500 flex items-center justify-center mx-auto mb-4 animate-pulse">
             <Tv className="w-8 h-8" />
           </div>
@@ -760,7 +872,7 @@ const VisorTV = () => {
 
         <TVClock isStandby={true} />
 
-        <div className="max-w-lg p-8 rounded-3xl border border-slate-800 bg-slate-900/95 shadow-2xl backdrop-blur-md">
+        <div className="max-w-lg p-8 rounded-3xl border border-slate-800 bg-slate-900 shadow-2xl">
           <div className="w-16 h-16 rounded-2xl bg-rose-500/10 text-rose-500 flex items-center justify-center mx-auto mb-4">
             <Radio className="w-8 h-8 animate-pulse" />
           </div>
@@ -801,64 +913,127 @@ const VisorTV = () => {
       onClick={handleUserActivity}
       onDoubleClick={toggleFullscreen}
     >
-      {/* ================= SINGLE-DECODER MEDIA SURFACE (Zero Black Screen Engine) ================= */}
+      {/* ================= DUAL-SLOT SEAMLESS MEDIA ENGINE (Zero Black Screen & Zero Decoder Crashes) ================= */}
       <div className="absolute inset-0 w-full h-full flex items-center justify-center overflow-hidden">
-        {/* Persistent Single Video Element (Always mounted, zero decoder reinstalls on Smart TVs) */}
-        <video
-          key="persistent-tv-video"
-          ref={videoRef}
-          src={currentItem?.type === 'video' && !isEmbedVideo ? resolveMediaUrl(currentItem.url) : undefined}
-          muted={isMuted}
-          loop={playlist.length === 1}
-          playsInline
-          preload="auto"
-          disablePictureInPicture
-          controlsList="nodownload nofullscreen noremoteplayback"
-          onLoadedData={() => {
-            if (!isPaused && currentItem?.type === 'video' && !isEmbedVideo) {
-              playSafe(videoRef.current);
-            }
-          }}
-          onPlaying={() => {
-            consecutiveErrorsRef.current = 0;
-            setVideoTransitioning(false);
-          }}
-          onTimeUpdate={handleVideoTimeUpdate}
-          onEnded={handleVideoEnded}
-          onError={handleMediaError}
-          className={`absolute inset-0 w-full h-full max-w-full max-h-full transition-opacity duration-300 ease-in-out ${
-            effectiveFit === 'cover' ? 'object-cover' : 'object-contain'
-          } ${effectiveFit !== 'contain' ? 'tv-video-enhanced' : ''} ${
-            currentItem?.type === 'video' && !isEmbedVideo ? 'opacity-100 z-10' : 'opacity-0 z-0 pointer-events-none'
+        {/* Slot A Media Presentation Surface */}
+        <div
+          className={`absolute inset-0 w-full h-full flex items-center justify-center transition-opacity duration-300 ease-in-out ${
+            activeSlot === 'A' ? 'opacity-100 z-10' : 'opacity-0 z-0 pointer-events-none'
           }`}
-          style={{ imageRendering: '-webkit-optimize-contrast' }}
-        />
-
-        {/* Dedicated Image Presentation Layer (Lightweight, 0 hardware decoder conflicts) */}
-        {currentItem?.type === 'image' && (
-          <img
-            key={`img-${currentItem.id}`}
-            src={resolveMediaUrl(currentItem.url)}
-            alt={currentItem.title || 'Visor TV Media'}
-            fetchPriority="high"
-            decoding="async"
-            onError={handleMediaError}
-            className={`absolute inset-0 w-full h-full max-w-full max-h-full transition-opacity duration-500 ease-in-out z-10 ${
+        >
+          <video
+            key="persistent-tv-video-a"
+            ref={videoRefA}
+            src={slotAItem?.type === 'video' && !getEmbedUrl(slotAItem?.url) ? resolveMediaUrl(slotAItem.url) : undefined}
+            muted={isMuted}
+            loop={playlist.length === 1}
+            playsInline
+            preload="auto"
+            disablePictureInPicture
+            controlsList="nodownload nofullscreen noremoteplayback"
+            onLoadedData={() => {
+              if (activeSlotRef.current === 'A' && !isPaused && slotAItem?.type === 'video' && !getEmbedUrl(slotAItem?.url)) {
+                playSafe(videoRefA.current);
+              }
+            }}
+            onPlaying={() => {
+              consecutiveErrorsRef.current = 0;
+            }}
+            onTimeUpdate={activeSlot === 'A' ? handleVideoTimeUpdate : undefined}
+            onEnded={activeSlot === 'A' ? handleVideoEnded : undefined}
+            onError={activeSlot === 'A' ? handleMediaError : undefined}
+            className={`absolute inset-0 w-full h-full max-w-full max-h-full transition-opacity duration-300 ease-in-out ${
               effectiveFit === 'cover' ? 'object-cover' : 'object-contain'
-            } ${videoTransitioning ? 'opacity-90' : 'opacity-100'}`}
+            } ${effectiveFit !== 'contain' ? 'tv-video-enhanced' : ''} ${
+              slotAItem?.type === 'video' && !getEmbedUrl(slotAItem?.url) ? 'opacity-100' : 'opacity-0 pointer-events-none'
+            }`}
+            style={{ imageRendering: '-webkit-optimize-contrast' }}
           />
-        )}
 
-        {/* Dedicated External Embed Layer (YouTube / Vimeo) */}
-        {isEmbedVideo && (
-          <iframe
-            key={`embed-${currentItem.id}`}
-            src={getEmbedUrl(currentItem.url)}
-            className="absolute inset-0 w-full h-full border-0 pointer-events-none z-10"
-            allow="autoplay; encrypted-media; picture-in-picture"
-            title={currentItem.title || 'Embed Video'}
+          {slotAItem?.type === 'image' && (
+            <img
+              key={`img-a-${slotAItem.id}`}
+              src={resolveMediaUrl(slotAItem.url)}
+              alt={slotAItem.title || 'Visor TV Media'}
+              fetchPriority="high"
+              decoding="async"
+              onError={activeSlot === 'A' ? handleMediaError : undefined}
+              className={`absolute inset-0 w-full h-full max-w-full max-h-full transition-opacity duration-300 ease-in-out ${
+                effectiveFit === 'cover' ? 'object-cover' : 'object-contain'
+              } opacity-100`}
+            />
+          )}
+
+          {slotAItem?.type === 'video' && getEmbedUrl(slotAItem?.url) && (
+            <iframe
+              key={`embed-a-${slotAItem.id}`}
+              src={getEmbedUrl(slotAItem.url)}
+              className="absolute inset-0 w-full h-full border-0 pointer-events-none"
+              allow="autoplay; encrypted-media; picture-in-picture"
+              title={slotAItem.title || 'Embed Video'}
+            />
+          )}
+        </div>
+
+        {/* Slot B Media Presentation Surface */}
+        <div
+          className={`absolute inset-0 w-full h-full flex items-center justify-center transition-opacity duration-300 ease-in-out ${
+            activeSlot === 'B' ? 'opacity-100 z-10' : 'opacity-0 z-0 pointer-events-none'
+          }`}
+        >
+          <video
+            key="persistent-tv-video-b"
+            ref={videoRefB}
+            src={slotBItem?.type === 'video' && !getEmbedUrl(slotBItem?.url) ? resolveMediaUrl(slotBItem.url) : undefined}
+            muted={isMuted}
+            loop={playlist.length === 1}
+            playsInline
+            preload="auto"
+            disablePictureInPicture
+            controlsList="nodownload nofullscreen noremoteplayback"
+            onLoadedData={() => {
+              if (activeSlotRef.current === 'B' && !isPaused && slotBItem?.type === 'video' && !getEmbedUrl(slotBItem?.url)) {
+                playSafe(videoRefB.current);
+              }
+            }}
+            onPlaying={() => {
+              consecutiveErrorsRef.current = 0;
+            }}
+            onTimeUpdate={activeSlot === 'B' ? handleVideoTimeUpdate : undefined}
+            onEnded={activeSlot === 'B' ? handleVideoEnded : undefined}
+            onError={activeSlot === 'B' ? handleMediaError : undefined}
+            className={`absolute inset-0 w-full h-full max-w-full max-h-full transition-opacity duration-300 ease-in-out ${
+              effectiveFit === 'cover' ? 'object-cover' : 'object-contain'
+            } ${effectiveFit !== 'contain' ? 'tv-video-enhanced' : ''} ${
+              slotBItem?.type === 'video' && !getEmbedUrl(slotBItem?.url) ? 'opacity-100' : 'opacity-0 pointer-events-none'
+            }`}
+            style={{ imageRendering: '-webkit-optimize-contrast' }}
           />
-        )}
+
+          {slotBItem?.type === 'image' && (
+            <img
+              key={`img-b-${slotBItem.id}`}
+              src={resolveMediaUrl(slotBItem.url)}
+              alt={slotBItem.title || 'Visor TV Media'}
+              fetchPriority="high"
+              decoding="async"
+              onError={activeSlot === 'B' ? handleMediaError : undefined}
+              className={`absolute inset-0 w-full h-full max-w-full max-h-full transition-opacity duration-300 ease-in-out ${
+                effectiveFit === 'cover' ? 'object-cover' : 'object-contain'
+              } opacity-100`}
+            />
+          )}
+
+          {slotBItem?.type === 'video' && getEmbedUrl(slotBItem?.url) && (
+            <iframe
+              key={`embed-b-${slotBItem.id}`}
+              src={getEmbedUrl(slotBItem.url)}
+              className="absolute inset-0 w-full h-full border-0 pointer-events-none"
+              allow="autoplay; encrypted-media; picture-in-picture"
+              title={slotBItem.title || 'Embed Video'}
+            />
+          )}
+        </div>
       </div>
 
       {/* ================= UNMUTE PROMPT BANNER (if muted) ================= */}
@@ -867,9 +1042,10 @@ const VisorTV = () => {
           onClick={(e) => {
             e.stopPropagation();
             setIsMuted(false);
-            if (videoRef.current) videoRef.current.muted = false;
+            if (videoRefA.current) videoRefA.current.muted = false;
+            if (videoRefB.current) videoRefB.current.muted = false;
           }}
-          className="absolute top-20 left-1/2 -translate-x-1/2 z-30 flex items-center gap-2 px-5 py-2.5 rounded-full bg-gradient-to-r from-rose-600 to-red-600 hover:from-rose-500 hover:to-red-500 text-white text-xs font-semibold shadow-2xl shadow-rose-600/40 backdrop-blur-md transition-transform hover:scale-105 cursor-pointer"
+          className="absolute top-20 left-1/2 -translate-x-1/2 z-30 flex items-center gap-2 px-5 py-2.5 rounded-full bg-gradient-to-r from-rose-600 to-red-600 hover:from-rose-500 hover:to-red-500 text-white text-xs font-semibold shadow-2xl shadow-rose-600/40 transition-transform hover:scale-105 cursor-pointer"
         >
           <VolumeX className="w-4 h-4 animate-pulse" />
           <span>Audio silenciado • Clic para activar sonido (o presione M)</span>
@@ -878,9 +1054,9 @@ const VisorTV = () => {
 
       {/* ================= OFFLINE STATUS BADGE (Non-blocking) ================= */}
       {isOfflineMode && (
-        <div className="absolute top-20 right-6 z-30 flex items-center gap-2 px-3 py-1.5 rounded-xl bg-amber-500/20 border border-amber-500/30 text-amber-300 text-[11px] font-medium backdrop-blur-md shadow-lg animate-pulse">
+        <div className="absolute top-20 right-6 z-30 flex items-center gap-2 px-3 py-1.5 rounded-xl bg-amber-500/20 border border-amber-500/30 text-amber-300 text-[11px] font-medium shadow-lg animate-pulse">
           <span className="w-2 h-2 rounded-full bg-amber-400" />
-          <span>Modo sin conexión • Transmitiendo desde caché</span>
+          <span>Modo sin conexión • Transmitiendo desde paquete local</span>
         </div>
       )}
 
@@ -893,7 +1069,7 @@ const VisorTV = () => {
         <div className="flex items-center gap-4">
           <button
             onClick={() => navigate('/')}
-            className={`p-2.5 rounded-2xl border shadow-xl backdrop-blur-xl transition-all hover:scale-105 cursor-pointer ${currentTheme.classes.controlBtn}`}
+            className={`p-2.5 rounded-2xl border shadow-xl transition-all hover:scale-105 cursor-pointer ${currentTheme.classes.controlBtn}`}
             title="Volver al selector de sedes"
           >
             <ArrowLeft className="w-5 h-5" />
@@ -980,7 +1156,7 @@ const VisorTV = () => {
             <button
               onClick={goToPrev}
               title="Anterior (Flecha izquierda)"
-              className={`p-2.5 rounded-2xl border backdrop-blur-xl transition-all hover:scale-105 cursor-pointer ${currentTheme.classes.controlBtn}`}
+              className={`p-2.5 rounded-2xl border transition-all hover:scale-105 cursor-pointer ${currentTheme.classes.controlBtn}`}
             >
               <SkipBack className="w-5 h-5" />
             </button>
@@ -996,7 +1172,7 @@ const VisorTV = () => {
             <button
               onClick={goToNext}
               title="Siguiente (Flecha derecha)"
-              className={`p-2.5 rounded-2xl border backdrop-blur-xl transition-all hover:scale-105 cursor-pointer ${currentTheme.classes.controlBtn}`}
+              className={`p-2.5 rounded-2xl border transition-all hover:scale-105 cursor-pointer ${currentTheme.classes.controlBtn}`}
             >
               <SkipForward className="w-5 h-5" />
             </button>
@@ -1006,10 +1182,11 @@ const VisorTV = () => {
               onClick={() => {
                 const nextMuted = !isMuted;
                 setIsMuted(nextMuted);
-                if (videoRef.current) videoRef.current.muted = nextMuted;
+                if (videoRefA.current) videoRefA.current.muted = nextMuted;
+                if (videoRefB.current) videoRefB.current.muted = nextMuted;
               }}
               title={isMuted ? 'Activar sonido (M)' : 'Silenciar (M)'}
-              className={`p-2.5 rounded-2xl border backdrop-blur-xl transition-colors cursor-pointer ${
+              className={`p-2.5 rounded-2xl border transition-colors cursor-pointer ${
                 isMuted
                   ? currentTheme.classes.controlBtn
                   : 'bg-gradient-to-r from-emerald-600 to-teal-600 text-white border-emerald-500 shadow-lg shadow-emerald-500/20'
@@ -1028,7 +1205,7 @@ const VisorTV = () => {
                   ? 'Ajustar original (Proporcional)'
                   : 'Nitidez Pro'
               }`}
-              className={`px-3.5 py-2.5 rounded-2xl text-xs font-semibold border backdrop-blur-xl transition-all cursor-pointer ${
+              className={`px-3.5 py-2.5 rounded-2xl text-xs font-semibold border transition-all cursor-pointer ${
                 effectiveFit === 'cover'
                   ? 'bg-rose-600/30 text-rose-200 border-rose-400/50 shadow-md shadow-rose-500/20'
                   : currentTheme.classes.controlBtn
@@ -1048,7 +1225,7 @@ const VisorTV = () => {
             <button
               onClick={() => setShowHelpModal(true)}
               title="Atajos de teclado y control remoto (?)"
-              className={`p-2.5 rounded-2xl border backdrop-blur-xl transition-colors cursor-pointer ${currentTheme.classes.controlBtn}`}
+              className={`p-2.5 rounded-2xl border transition-colors cursor-pointer ${currentTheme.classes.controlBtn}`}
             >
               <HelpCircle className="w-5 h-5" />
             </button>
@@ -1057,7 +1234,7 @@ const VisorTV = () => {
             <button
               onClick={toggleFullscreen}
               title={isFullscreen ? 'Salir de pantalla completa (F11)' : 'Pantalla completa (F11)'}
-              className={`p-2.5 rounded-2xl border backdrop-blur-xl transition-colors flex items-center gap-1.5 text-xs font-medium cursor-pointer ${currentTheme.classes.controlBtn}`}
+              className={`p-2.5 rounded-2xl border transition-colors flex items-center gap-1.5 text-xs font-medium cursor-pointer ${currentTheme.classes.controlBtn}`}
             >
               {isFullscreen ? <Minimize className="w-5 h-5" /> : <Maximize className="w-5 h-5" />}
               <span className="hidden sm:inline">{isFullscreen ? 'Normal' : 'Pantalla Completa'}</span>
@@ -1069,11 +1246,11 @@ const VisorTV = () => {
       {/* ================= HELP / SHORTCUTS MODAL ================= */}
       {showHelpModal && (
         <div
-          className="fixed inset-0 bg-black/80 backdrop-blur-md z-50 flex items-center justify-center p-4"
+          className="fixed inset-0 bg-black/80 z-50 flex items-center justify-center p-4"
           onClick={() => setShowHelpModal(false)}
         >
           <div
-            className="bg-slate-900 border border-slate-700/80 rounded-3xl p-6 sm:p-8 max-w-md w-full shadow-2xl text-white relative animate-in fade-in zoom-in-95 duration-200"
+            className="bg-slate-900 border border-slate-700/80 rounded-3xl p-6 sm:p-8 max-w-md w-full shadow-2xl text-white relative"
             onClick={(e) => e.stopPropagation()}
           >
             <div className="flex items-center justify-between pb-4 border-b border-slate-800">

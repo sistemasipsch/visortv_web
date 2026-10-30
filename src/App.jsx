@@ -42,18 +42,16 @@ class GlobalErrorBoundary extends React.Component {
   }
 }
 
-const PageLoader = () => (
-  <div className="fixed inset-0 w-full h-full bg-black flex flex-col items-center justify-center gap-4 text-white z-50">
-    <div className="w-9 h-9 rounded-full border-3 border-rose-950 border-t-rose-500 animate-spin" />
-    <span className="text-xs font-mono font-semibold tracking-wider text-slate-400">Cargando Visor TV...</span>
-  </div>
+// Silent neutral fallback (zero spinners or loading text shown to patients)
+const SilentFallback = () => (
+  <div className="fixed inset-0 w-full h-full bg-black z-50 pointer-events-none" />
 );
 
 function App() {
   return (
     <GlobalErrorBoundary>
       <BrowserRouter>
-        <Suspense fallback={<PageLoader />}>
+        <Suspense fallback={<SilentFallback />}>
           <Routes>
             {/* Public TV & Kiosk Routes (Priority #1, ultra-lightweight) */}
             <Route path="/" element={<SedesSelection />} />
