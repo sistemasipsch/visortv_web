@@ -12,7 +12,10 @@
 import { resolveMediaUrl } from './api';
 
 const CACHE_NAME = 'visortv_sede_package_v1';
-const preloadedImages = new Set();
+// Strict sliding window: retain max 3 decoded HTMLImageElement instances in RAM (~25MB max)
+// to prevent progressive top-to-bottom rendering while strictly avoiding Smart TV RAM exhaustion
+const MAX_DECODED_IMAGES = 3;
+const decodedImageMap = new Map();
 let isPreloading = false;
 
 export const mediaCacheManager = {
@@ -29,9 +32,17 @@ export const mediaCacheManager = {
 
   /**
    * Pre-decode an image into GPU memory so when it renders, there is zero flicker
+   * Keeps an active reference in decodedImageMap to prevent TV GPU garbage collection
    */
   preloadImage: async (url) => {
-    if (!url || preloadedImages.has(url)) return true;
+    if (!url) return true;
+
+    // Fast path: if already pre-decoded and ready in sliding window, return in 0ms
+    const cachedImg = decodedImageMap.get(url);
+    if (cachedImg && cachedImg.complete && cachedImg.naturalWidth > 0) {
+      return true;
+    }
+
     try {
       const img = new Image();
       img.src = url;
@@ -43,7 +54,18 @@ export const mediaCacheManager = {
           img.onerror = resolve;
         });
       }
-      preloadedImages.add(url);
+
+      // Add to sliding window and evict oldest if exceeding capacity
+      decodedImageMap.set(url, img);
+      while (decodedImageMap.size > MAX_DECODED_IMAGES) {
+        const oldestUrl = decodedImageMap.keys().next().value;
+        const oldImg = decodedImageMap.get(oldestUrl);
+        if (oldImg) {
+          oldImg.src = ''; // Deallocate GPU texture memory immediately
+        }
+        decodedImageMap.delete(oldestUrl);
+      }
+
       return true;
     } catch (err) {
       console.debug('Image preload skipped or failed:', url, err);
@@ -113,7 +135,12 @@ export const mediaCacheManager = {
    * Clear old cache items if needed
    */
   clearPackageCache: async () => {
-    preloadedImages.clear();
+    for (const img of decodedImageMap.values()) {
+      try {
+        img.src = '';
+      } catch {}
+    }
+    decodedImageMap.clear();
     try {
       if (typeof window !== 'undefined' && 'caches' in window) {
         await caches.delete(CACHE_NAME);

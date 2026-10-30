@@ -506,7 +506,7 @@ const VisorTV = () => {
 
   // Seamless Dual-Slot A/B Transition Engine (Zero Black Screen, Zero Decoder Memory Leaks)
   const transitionTo = useCallback(
-    (targetIndex) => {
+    async (targetIndex) => {
       const items = latestPlaylistRef.current;
       if (!items || items.length === 0) return;
 
@@ -535,7 +535,18 @@ const VisorTV = () => {
       const currentSlot = activeSlotRef.current;
       const nextSlot = currentSlot === 'A' ? 'B' : 'A';
 
-      // Load next item into reserve slot and ensure DOM video element source is primed immediately
+      // 1. If next item is an image: pre-decode bitmap into RAM BEFORE triggering crossfade!
+      // Outgoing content stays 100% visible on screen so there are zero black flashes.
+      // If already pre-warmed in background, this resolves in 0ms; otherwise capped at 350ms.
+      if (nextItem?.type === 'image' && nextItem.url) {
+        const fullUrl = resolveMediaUrl(nextItem.url);
+        await Promise.race([
+          mediaCacheManager.preloadImage(fullUrl),
+          new Promise((resolve) => setTimeout(resolve, 350)),
+        ]);
+      }
+
+      // 2. Load next item into reserve slot and ensure DOM video element source is primed immediately
       if (nextSlot === 'A') {
         setSlotAItem(nextItem);
         if (videoRefA.current && nextItem?.type === 'video' && !getEmbedUrl(nextItem?.url)) {
@@ -560,11 +571,11 @@ const VisorTV = () => {
       currentIndexRef.current = validIndex;
       updateProgressDom(0);
 
-      // Perform smooth crossfade
+      // 3. Perform smooth crossfade: image is ALREADY decoded, so it paints 100% complete with 0 scanlines
       setActiveSlot(nextSlot);
       activeSlotRef.current = nextSlot;
 
-      // After 350ms crossfade completes: cleanly release previous video decoder context
+      // 4. After 350ms crossfade completes: cleanly release previous video decoder context
       // AND set the released slot state to null so React detects future changes in continuous loops
       transitionTimeoutRef.current = setTimeout(() => {
         transitionTimeoutRef.current = null;
@@ -956,7 +967,7 @@ const VisorTV = () => {
               src={resolveMediaUrl(slotAItem.url)}
               alt={slotAItem.title || 'Visor TV Media'}
               fetchPriority="high"
-              decoding="async"
+              decoding="sync"
               onError={activeSlot === 'A' ? handleMediaError : undefined}
               className={`absolute inset-0 w-full h-full max-w-full max-h-full transition-opacity duration-300 ease-in-out ${
                 effectiveFit === 'cover' ? 'object-cover' : 'object-contain'
@@ -1016,7 +1027,7 @@ const VisorTV = () => {
               src={resolveMediaUrl(slotBItem.url)}
               alt={slotBItem.title || 'Visor TV Media'}
               fetchPriority="high"
-              decoding="async"
+              decoding="sync"
               onError={activeSlot === 'B' ? handleMediaError : undefined}
               className={`absolute inset-0 w-full h-full max-w-full max-h-full transition-opacity duration-300 ease-in-out ${
                 effectiveFit === 'cover' ? 'object-cover' : 'object-contain'

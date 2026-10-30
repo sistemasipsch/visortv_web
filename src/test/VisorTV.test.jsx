@@ -490,4 +490,53 @@ describe('VisorTV component', () => {
       );
     });
   });
+
+  it('pre-decodes incoming images and sets decoding=sync to prevent top-to-bottom progressive scan', async () => {
+    const preloadSpy = vi.spyOn(mediaCacheManager, 'preloadImage').mockResolvedValue(true);
+
+    vi.spyOn(playlistService, 'getPlaylist').mockResolvedValue({
+      data: {
+        success: true,
+        version_hash: 'sync-image-hash',
+        sede: { id: 1, name: 'Sede Sync Img', slug: 'sede-sync-img' },
+        playlist: [
+          { id: 1, title: 'Foto 1', type: 'image', url: 'https://example.com/foto1.jpg', duration: 10 },
+          { id: 2, title: 'Foto 2', type: 'image', url: 'https://example.com/foto2.jpg', duration: 10 },
+        ],
+        settings: {},
+      },
+    });
+
+    render(
+      <MemoryRouter initialEntries={['/visor/sede-sync-img']}>
+        <Routes>
+          <Route path="/visor/:slug" element={<VisorTV />} />
+        </Routes>
+      </MemoryRouter>
+    );
+
+    await waitFor(() => {
+      expect(screen.getByAltText(/Foto 1/i)).toBeInTheDocument();
+    });
+
+    // Check that Slot A image has decoding="sync"
+    const img1 = screen.getByAltText(/Foto 1/i);
+    expect(img1.getAttribute('decoding')).toBe('sync');
+
+    // Advance to Foto 2
+    const nextBtn = screen.getByTitle(/Siguiente/i);
+    await act(async () => {
+      fireEvent.click(nextBtn);
+      await new Promise((r) => setTimeout(r, 400));
+    });
+
+    await waitFor(() => {
+      expect(screen.getByAltText(/Foto 2/i)).toBeInTheDocument();
+    });
+
+    // Check that Foto 2 was preloaded/pre-decoded and rendered with decoding="sync"
+    const img2 = screen.getByAltText(/Foto 2/i);
+    expect(img2.getAttribute('decoding')).toBe('sync');
+    expect(preloadSpy).toHaveBeenCalledWith(expect.stringContaining('foto2.jpg'));
+  });
 });
