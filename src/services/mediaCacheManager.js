@@ -74,31 +74,15 @@ export const mediaCacheManager = {
   },
 
   /**
-   * Pre-warm video network pipeline in browser cache without keeping huge blobs in RAM
-   * (Protects against OOM / Renderer Crash on Smart TVs with low RAM)
+   * Pre-warm video check for Smart TV playback.
+   * On low-spec Smart TVs, native <video> elements handle video streaming via hardware
+   * decoders and HTTP Range requests when queued in slot A or B.
+   * Making JavaScript fetch() calls on cross-origin video files triggers CORS restrictions,
+   * wastes network bandwidth, and risks browser renderer crashes.
    */
   prewarmVideo: async (url) => {
     if (!url) return false;
-    try {
-      if (typeof window !== 'undefined' && 'caches' in window) {
-        const cache = await caches.open(CACHE_NAME);
-        const match = await cache.match(url);
-        if (match) return true;
-
-        // Fetch first slice or HEAD to prime TV DNS and HTTP connection
-        const response = await fetch(url, {
-          method: 'HEAD',
-          headers: { 'Accept': 'video/mp4,video/*;q=0.9,*/*;q=0.8' },
-        });
-        if (response.ok) {
-          // Video headers pre-warmed successfully
-          return true;
-        }
-      }
-    } catch {
-      // Network pre-warm is an optimization, never block playback if it fails
-    }
-    return false;
+    return true;
   },
 
   /**
